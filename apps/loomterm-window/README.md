@@ -118,7 +118,7 @@ HWND receives foreground. Do not use input success to infer IME behavior.
 | Native system close, no-client XTVERSION continuation, same Daemon/Shell/Terminal reattach | Passed |
 | Actual bitmap capture | Available through Win32 PrintWindow; not a blanket visual Pass |
 | Repeated-resize visual stability | Long PowerShell prompt/reflow residuals observed; unresolved |
-| Native key/mouse/OS Clipboard/IME and independent scrolling | Pending; foreground guard skipped automated input |
+| Native key/mouse/OS Clipboard/IME and independent scrolling | Pending; foreground-guard skips and one failed opt-in Unicode round-trip attempt are retained; no native input Pass claimed |
 | CJK/emoji/combining/wide-cell rendering | Chinese and composed é visible in a captured sample; Emoji absent there; full width/cursor/IME acceptance remains incomplete |
 | Kitty PNG across both terminal layers | Fail: source emits APC, current inner system ConPTY preserves the text marker but drops Kitty APC before the engine/TUI |
 
