@@ -165,9 +165,16 @@ class Host:
     def select_test_split(self, pane):
         # New clients have independent focus. This fixture is the right split of
         # tab 2; use existing TUI actions, then prove input reaches that child.
+        self.case.result['phase'] = 'reattach-tab-focus'
         self.text('\x022')
+        wait_for(lambda: self.case.focused()['tab_id'] == pane['tab_id'])
+        # Directional navigation uses the client's current snapshot. Do not issue
+        # it until this client's rendered tab contains the fixture continuation.
+        self.visible('"event":"continuation"')
+        self.case.result['phase'] = 'reattach-pane-focus'
         self.text('\x02l')
         wait_for(lambda: self.case.focused()['pane_id'] == pane['pane_id'])
+        self.case.result['phase'] = 'reattach-marker'
         challenge = self.case.token + 'r'
         self.text('MARK ' + challenge + '\r')
         return wait_for(lambda: self.case.fixture_event(pane, 'marker_ack', value=challenge))

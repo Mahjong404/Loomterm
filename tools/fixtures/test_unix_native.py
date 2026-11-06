@@ -1,5 +1,6 @@
 """Controller parser and fail-closed host guards; these do not certify native PTY."""
 import importlib.util
+from collections import namedtuple
 from pathlib import Path
 import unittest
 import tempfile
@@ -22,19 +23,29 @@ runner = module('unix_runner', Path(__file__).parents[1] / 'test-unix-native.py'
 class Guards(unittest.TestCase):
     def test_reattach_selects_split_and_requires_child_marker_ack(self):
         commands = []
-        pane = dict(pane_id='split')
-        case = SimpleNamespace(token='unitfixture', focused=lambda: pane,
+        pane = dict(pane_id='split', tab_id='tab2')
+        projected = {'ready': False, 'right': False}
+        def send(command):
+            commands.append(command)
+            if command == '\x02l':
+                projected['right'] = projected['ready']
+        def visible(text):
+            self.assertEqual(commands, ['\x022'])
+            self.assertEqual(text, '"event":"continuation"')
+            projected['ready'] = True
+        case = SimpleNamespace(token='unitfixture', result={},
+                               focused=lambda: pane if projected['right'] else dict(tab_id='tab2', pane_id='left'),
                                fixture_event=lambda _pane, _event, **fields: dict(value=fields['value'])
                                if commands[-1] == 'MARK unitfixturer\r' else None)
-        host = SimpleNamespace(case=case, text=commands.append)
+        host = SimpleNamespace(case=case, text=send, visible=visible)
         result = controller.Host.select_test_split(host, pane)
         self.assertEqual(commands, ['\x022', '\x02l', 'MARK unitfixturer\r'])
         self.assertEqual(result['value'], 'unitfixturer')
 
     def test_reattach_wrong_focus_cannot_send_work_input(self):
         commands = []
-        case = SimpleNamespace(token='unitfixture', focused=lambda: dict(pane_id='other'))
-        host = SimpleNamespace(case=case, text=commands.append)
+        case = SimpleNamespace(token='unitfixture', result={}, focused=lambda: dict(tab_id='tab2', pane_id='other'))
+        host = SimpleNamespace(case=case, text=commands.append, visible=lambda _text: None)
         def once(check):
             result = check()
             if not result:
@@ -42,8 +53,22 @@ class Guards(unittest.TestCase):
             return result
         with patch.object(controller, 'wait_for', side_effect=once):
             with self.assertRaises(TimeoutError):
-                controller.Host.select_test_split(host, dict(pane_id='split'))
+                controller.Host.select_test_split(host, dict(pane_id='split', tab_id='tab2'))
         self.assertEqual(commands, ['\x022', '\x02l'])
+
+    def test_reattach_old_tab_cannot_issue_directional_command(self):
+        commands = []
+        case = SimpleNamespace(token='unitfixture', result={}, focused=lambda: dict(tab_id='tab1', pane_id='old'))
+        host = SimpleNamespace(case=case, text=commands.append)
+        def once(check):
+            result = check()
+            if not result:
+                raise TimeoutError('tab not confirmed')
+            return result
+        with patch.object(controller, 'wait_for', side_effect=once):
+            with self.assertRaises(TimeoutError):
+                controller.Host.select_test_split(host, dict(pane_id='split', tab_id='tab2'))
+        self.assertEqual(commands, ['\x022'])
 
     def test_runtime_identity_export_retains_boot_terminal_birth_and_drops_paths(self):
         event = dict(event='reattached', time_ns=1,
@@ -86,7 +111,7 @@ class Guards(unittest.TestCase):
                 if 'stdout' in kwargs:
                     kwargs['stdout'].write(text.encode())
                 return SimpleNamespace(pid=123, wait=lambda _timeout: code)
-            with patch.object(runner, 'target', return_value='x86_64-unknown-linux-gnu'), patch.object(runner.sys, 'platform', 'linux'), patch.object(runner.shutil, 'which', return_value='synthetic-tool'), patch.object(runner.subprocess, 'Popen', side_effect=tool), patch.object(runner.sys, 'argv', ['native-test', '--evidence', str(out)]), patch.dict(runner.os.environ), patch.object(Path, 'read_text', autospec=True, side_effect=Path.read_text) as _read, patch('builtins.print'):
+            with patch.object(runner, 'target', return_value='x86_64-unknown-linux-gnu'), patch.object(runner.sys, 'platform', 'linux'), patch.object(runner.shutil, 'which', return_value='synthetic-tool'), patch.object(runner.platform, 'uname', return_value=namedtuple('Uname', 'system node release version machine processor')('Linux', 'fixture', 'kernel', 'version', 'x86_64', 'cpu')), patch.object(runner.subprocess, 'Popen', side_effect=tool), patch.object(runner.sys, 'argv', ['native-test', '--evidence', str(out)]), patch.dict(runner.os.environ), patch.object(Path, 'read_text', autospec=True, side_effect=Path.read_text) as _read, patch('builtins.print'):
                 runner.os.environ.pop('LOOMTERM_NATIVE_MANIFEST', None)
                 # /etc/os-release is inventory-only; keep this unit test portable.
                 original_read = _read.side_effect
@@ -119,7 +144,7 @@ class Guards(unittest.TestCase):
             def failing_tool(_argv, **kwargs):
                 kwargs['stdout'].write(b'controlled prerequisite failure\n')
                 return SimpleNamespace(pid=123, wait=lambda _timeout: 1)
-            with patch.object(runner, 'target', return_value='x86_64-unknown-linux-gnu'), patch.object(runner.shutil, 'which', return_value='synthetic-tool'), patch.object(runner.subprocess, 'Popen', side_effect=failing_tool), patch.object(runner.sys, 'argv', ['native-test', '--evidence', str(out)]), patch.dict(runner.os.environ), patch('builtins.print'):
+            with patch.object(runner, 'target', return_value='x86_64-unknown-linux-gnu'), patch.object(runner.shutil, 'which', return_value='synthetic-tool'), patch.object(runner.platform, 'uname', return_value=namedtuple('Uname', 'system node release version machine processor')('Linux', 'fixture', 'kernel', 'version', 'x86_64', 'cpu')), patch.object(runner.subprocess, 'Popen', side_effect=failing_tool), patch.object(runner.sys, 'argv', ['native-test', '--evidence', str(out)]), patch.dict(runner.os.environ), patch('builtins.print'):
                 runner.os.environ.pop('LOOMTERM_NATIVE_MANIFEST', None)
                 self.assertEqual(runner.main(), 1)
             summary = json.loads((out / 'ci-summary.json').read_text())
