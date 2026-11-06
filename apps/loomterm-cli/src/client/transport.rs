@@ -370,7 +370,7 @@ mod tests {
     use super::*;
     use crate::client::endpoint::EndpointTransport as _;
     use interprocess::local_socket::traits::Listener as _;
-    use std::io::{Read as _, Write as _};
+    use std::io::Write as _;
     use std::time::Instant;
 
     #[test]

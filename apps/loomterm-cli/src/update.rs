@@ -1091,10 +1091,8 @@ fn running_update_targets() -> Result<Vec<RunningUpdateTarget>, String> {
                 socket_path.display()
             ),
             attach_command: None,
-            client_socket_path: crate::server::socket_paths::client_socket_path_from_overrides(
-                Some(&socket_path.to_string_lossy()),
-                None,
-            ),
+            // Entry validation already binds overrides to the selected product session.
+            client_socket_path: crate::server::socket_paths::client_socket_path(),
             socket_path,
             must_be_running: false,
         }]);

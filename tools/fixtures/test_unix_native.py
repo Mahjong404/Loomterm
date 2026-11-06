@@ -19,6 +19,19 @@ runner = module('unix_runner', Path(__file__).parents[1] / 'test-unix-native.py'
 
 
 class Guards(unittest.TestCase):
+    def test_case_uses_short_tmp_root_instead_of_macos_tmpdir(self):
+        with tempfile.TemporaryDirectory(prefix='lt-root-policy-') as directory:
+            base = Path(directory) / 'short'
+            base.mkdir()
+            args = SimpleNamespace(host=Path('host'), exe=Path('exe'), fixture=Path('fixture'),
+                                   evidence=Path(directory) / 'evidence')
+            with patch.object(controller.tempfile, 'mkdtemp', return_value=str(base)) as factory:
+                case = controller.Case(args, 'preflight')
+            factory.assert_called_once_with(prefix='lt-m2-', dir='/tmp')
+            self.assertEqual(case.root.parent, base.resolve())
+        endpoint = Path('/private/tmp/lt-m2-abcdefgh/product/runtime/m2-12345678/loomterm-client.sock')
+        self.assertLessEqual(len(str(endpoint).encode('utf-8')), 103)
+
     def test_failed_tool_exports_phase_and_diagnostic_to_ci_summary(self):
         with tempfile.TemporaryDirectory(prefix='lt-failed-tool-') as directory:
             out = Path(directory) / 'evidence'

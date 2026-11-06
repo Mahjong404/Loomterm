@@ -165,6 +165,8 @@ def main():
     # Only synthetic, selected observations may leave the runner. Never upload
     # .vt, raw logs, HOME, config files, private research or build/cache trees.
     public = dict(status=results['status'], target=triple, m2_gate='Pending',
+                  host=dict(system=platform.system(), kernel=platform.release(),
+                            architecture=platform.machine(), libc=platform.libc_ver()),
                   source_sha256=results['source_sha256'], artifacts=results.get('artifacts', {}), cases=[],
                   active_phase=results['active_phase'], completed_phases=results['completed_phases'],
                   error=redact_paths(results.get('error', ''), repo, out),

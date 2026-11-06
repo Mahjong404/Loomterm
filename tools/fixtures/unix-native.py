@@ -179,7 +179,7 @@ class Case:
         self.out = args.evidence.resolve() / (label + '-' + self.token)
         self.out.mkdir(parents=True)
         # Short socket root is independent of potentially long checkout/artifact paths.
-        base = Path(tempfile.mkdtemp(prefix='lt-m2-')).resolve()
+        base = Path(tempfile.mkdtemp(prefix='lt-m2-', dir='/tmp')).resolve()
         self.root = base / 'product'
         self.source = base / "中文 项目 O'Neil"
         self.source.mkdir()
