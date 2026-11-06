@@ -162,6 +162,16 @@ class Host:
     def visible(self, text):
         return wait_for(lambda: text in self.command()['screen'])
 
+    def select_test_split(self, pane):
+        # New clients have independent focus. This fixture is the right split of
+        # tab 2; use existing TUI actions, then prove input reaches that child.
+        self.text('\x022')
+        self.text('\x02l')
+        wait_for(lambda: self.case.focused()['pane_id'] == pane['pane_id'])
+        challenge = self.case.token + 'r'
+        self.text('MARK ' + challenge + '\r')
+        return wait_for(lambda: self.case.fixture_event(pane, 'marker_ack', value=challenge))
+
     def detach(self):
         self.send(input='\x02q')
         value = self.receive()
@@ -189,7 +199,7 @@ class Case:
         self.env.update(LOOMTERM_ROOT=str(self.root), LOOMTERM_SESSION='m2-' + self.token[:8])
         self.api_path = self.root / 'runtime' / self.env['LOOMTERM_SESSION'] / 'loomterm.sock'
         self.client_path = self.api_path.with_name('loomterm-client.sock')
-        self.result = dict(status='Fail', root=str(self.root), label=label, tests={})
+        self.result = dict(status='Fail', root=str(self.root), label=label, phase='prepare', tests={})
         save(self.out / 'result.json', self.result)
 
     def record(self, event, **fields):
@@ -300,6 +310,7 @@ class Case:
 
 def acceptance(case, concurrent):
     case.prepare()
+    case.result['phase'] = 'cold-start'
     hosts = [Host(case, 'first')]
     if concurrent:
         hosts.append(Host(case, 'second'))
@@ -317,6 +328,7 @@ def acceptance(case, concurrent):
     pane = case.focused()
     shell_pid = case.api('pane.process_info', dict(pane_id=pane['pane_id']))['process_info']['shell_pid']
     shell = case.register(shell_pid, 'shell')
+    case.result['phase'] = 'ipc-identity'
     for path in (case.api_path, case.client_path):
         metadata = path.lstat()
         assert stat.S_ISSOCK(metadata.st_mode) and metadata.st_uid == os.getuid()
@@ -333,6 +345,7 @@ def acceptance(case, concurrent):
     case.record('instance', instance=instance, pane=pane, shell=shell)
     for host in hosts[1:]:
         host.detach()
+    case.result['phase'] = 'source-tab-split'
     # Ordinary shell, explicit Source Folder and real TUI layout keys.
     first.text('cd ' + shlex.quote(str(case.child_dir)) + '\r')
     first.text("printf 'CD_DONE_%s\\n' " + case.token + '\r')
@@ -349,6 +362,8 @@ def acceptance(case, concurrent):
     ready = wait_for(lambda: case.fixture_event(target, 'ready'))
     fixture = case.register(ready['pid'], 'fixture')
     assert ready['tty'] and ready['pgrp'] == fixture['pgrp'] and ready['sid'] == fixture['sid']
+    case.record('runtime_target', instance=instance, pane=target, shell=target_shell, fixture=fixture)
+    case.result['phase'] = 'query-resize'
     first.text('MARK ' + case.token + '\r')
     wait_for(lambda: case.fixture_event(target, 'marker_ack', value=case.token))
     first.text('QUERY1\r')
@@ -365,6 +380,7 @@ def acceptance(case, concurrent):
         events = [json.loads(m.group()) for m in re.finditer(r'\{[^{}]*\}', text.replace('\r', '').replace('\n', ''))]
         return next((e for e in events if e.get('event') == 'size' and e.get('token') == case.token and e['cols'] > before['cols'] and e['rows'] > before['rows']), None)
     case.record('resize', before=before, after=wait_for(resized))
+    case.result['phase'] = 'detach-no-client-query'
     first.text('DETACHQUERY2\r')
     wait_for(lambda: case.fixture_event(target, 'detach_armed'))
     detached = first.detach()
@@ -372,20 +388,26 @@ def acceptance(case, concurrent):
     assert reply['query_time_ns'] > detached
     wait_for(lambda: case.fixture_event(target, 'continuation', phase=2))
     assert same_process(target_shell) and same_process(fixture)
+    case.result['phase'] = 'reattach-identity'
     attached = Host(case, 'reattach')
     attached.start()
     attached.ready()
     assert case.api('ping')['capabilities']['loomterm'] == instance
     assert any(p['terminal_id'] == target['terminal_id'] for p in case.shape(3, 2)['panes'])
+    assert same_process(target_shell) and same_process(fixture)
+    case.result['phase'] = 'reattach-focus'
+    attached.select_test_split(target)
+    case.record('reattached', instance=instance, pane=target, shell=target_shell, fixture=fixture)
+    case.result['phase'] = 'fixture-exit-tail'
     attached.text('EXIT0\r')
     wait_for(lambda: case.fixture_event(target, 'tail', code=0))
     wait_for(lambda: not same_process(fixture))
+    case.result['phase'] = 'close-pane'
     attached.text('\x02x')
-    attached.text('y')
     case.shape(2, 2)
     wait_for(lambda: not same_process(target_shell))
     attached.detach()
-    case.result.update(status='Pass', tests=dict(dual_ipc='Pass', wrong_version='Pass',
+    case.result.update(status='Pass', phase='complete', tests=dict(dual_ipc='Pass', wrong_version='Pass',
                        real_tui='Pass', source_cd_tab_split='Pass', query_reply='Pass', resize='Pass',
                        detach_no_client_reply='Pass', reattach_identity='Pass', close_pane='Pass',
                        concurrent_cold='Pass' if concurrent else 'Pending',

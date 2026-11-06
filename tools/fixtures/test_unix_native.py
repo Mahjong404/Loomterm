@@ -20,6 +20,43 @@ runner = module('unix_runner', Path(__file__).parents[1] / 'test-unix-native.py'
 
 
 class Guards(unittest.TestCase):
+    def test_reattach_selects_split_and_requires_child_marker_ack(self):
+        commands = []
+        pane = dict(pane_id='split')
+        case = SimpleNamespace(token='unitfixture', focused=lambda: pane,
+                               fixture_event=lambda _pane, _event, **fields: dict(value=fields['value'])
+                               if commands[-1] == 'MARK unitfixturer\r' else None)
+        host = SimpleNamespace(case=case, text=commands.append)
+        result = controller.Host.select_test_split(host, pane)
+        self.assertEqual(commands, ['\x022', '\x02l', 'MARK unitfixturer\r'])
+        self.assertEqual(result['value'], 'unitfixturer')
+
+    def test_reattach_wrong_focus_cannot_send_work_input(self):
+        commands = []
+        case = SimpleNamespace(token='unitfixture', focused=lambda: dict(pane_id='other'))
+        host = SimpleNamespace(case=case, text=commands.append)
+        def once(check):
+            result = check()
+            if not result:
+                raise TimeoutError('focus not confirmed')
+            return result
+        with patch.object(controller, 'wait_for', side_effect=once):
+            with self.assertRaises(TimeoutError):
+                controller.Host.select_test_split(host, dict(pane_id='split'))
+        self.assertEqual(commands, ['\x022', '\x02l'])
+
+    def test_runtime_identity_export_retains_boot_terminal_birth_and_drops_paths(self):
+        event = dict(event='reattached', time_ns=1,
+                     instance=dict(product='loomterm', namespace='test', instance_id='boot', pid=10, root='private-path'),
+                     pane=dict(pane_id='pane', terminal_id='terminal', tab_id='tab', cwd='private-path'),
+                     shell=dict(pid=11, birth='ticks', uid=1001, executable='private-path'),
+                     fixture=dict(pid=12, birth='ticks2', uid=1001, executable='private-path'))
+        public = runner.public_runtime_identity(event)
+        self.assertEqual(public['backend']['instance_id'], 'boot')
+        self.assertEqual(public['pane']['terminal_id'], 'terminal')
+        self.assertEqual(public['shell']['birth'], 'ticks')
+        self.assertNotIn('private-path', json.dumps(public))
+
     def test_late_lint_failure_retains_runtime_completion_but_fails_overall(self):
         with tempfile.TemporaryDirectory(prefix='lt-lint-order-') as directory:
             out = (Path(directory) / 'evidence').resolve()

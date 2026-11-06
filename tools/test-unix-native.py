@@ -46,6 +46,17 @@ def target():
     raise RuntimeError(f'requires native Linux x86_64/glibc or macOS arm64; got {system}/{machine}')
 
 
+def public_runtime_identity(event):
+    def select(value, keys):
+        return {key: value[key] for key in keys if key in value}
+    process_keys = ('pid', 'uid', 'birth', 'precision', 'pgrp', 'sid')
+    return dict(event=event['event'], time_ns=event['time_ns'],
+                backend=select(event.get('instance', {}), ('product', 'namespace', 'instance_id', 'pid')),
+                pane=select(event.get('pane', {}), ('pane_id', 'terminal_id', 'tab_id')),
+                shell=select(event.get('shell', {}), process_keys),
+                fixture=select(event.get('fixture', {}), process_keys))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--evidence', type=Path, required=True)
@@ -171,6 +182,8 @@ def main():
                   host=dict(system=platform.system(), kernel=platform.release(),
                             architecture=platform.machine(), libc=platform.libc_ver()),
                   source_sha256=results['source_sha256'], artifacts=results.get('artifacts', {}), cases=[],
+                  native_headers_sha256=results.get('headers_sha256', {}),
+                  link_closure=redact_paths(results.get('closure', ''), repo, out)[:8192],
                   active_phase=results['active_phase'], completed_phases=results['completed_phases'],
                   error=redact_paths(results.get('error', ''), repo, out),
                   diagnostic_tail=results.get('diagnostic_tail', ''),
@@ -180,10 +193,12 @@ def main():
         timeline_path = path.with_name('timeline.json')
         timeline = json.loads(timeline_path.read_text()) if timeline_path.exists() else []
         public['cases'].append(dict(label=case['label'], status=case['status'], tests=case.get('tests', {}),
+                                    phase=case.get('phase', 'unrecorded'),
                                     error=redact_paths(case.get('traceback', '').strip().splitlines()[-1], repo, out)[:512]
                                     if case.get('traceback', '').strip() else '',
                                     cleanup_errors=bool(case.get('cleanup_errors') or case.get('live_registered')),
                                     observations=[e for e in timeline if e['event'] in ('fixture', 'resize', 'wrong_version_rejected')],
+                                    identities=[public_runtime_identity(e) for e in timeline if e['event'] in ('instance', 'runtime_target', 'reattached')],
                                     after=[{k: p[k] for k in ('pid', 'uid', 'birth', 'precision', 'exited', 'pgrp', 'sid') if k in p}
                                            for p in case.get('after', [])]))
     (out / 'ci-summary.json').write_text(json.dumps(public, indent=2), encoding='utf-8')
