@@ -3,6 +3,7 @@ import importlib.util
 from pathlib import Path
 import unittest
 import tempfile
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -19,6 +20,49 @@ runner = module('unix_runner', Path(__file__).parents[1] / 'test-unix-native.py'
 
 
 class Guards(unittest.TestCase):
+    def test_late_lint_failure_retains_runtime_completion_but_fails_overall(self):
+        with tempfile.TemporaryDirectory(prefix='lt-lint-order-') as directory:
+            out = (Path(directory) / 'evidence').resolve()
+            order = []
+            def tool(argv, **kwargs):
+                label = ' '.join(argv[:2])
+                order.append(label)
+                code, text = 0, ''
+                if argv[0] == 'rustc':
+                    text = 'rustc 1.96.1 (fixture)\n'
+                elif argv[0] == 'cargo' and argv[1] == '--version':
+                    text = 'cargo 1.96.1 (fixture)\n'
+                elif argv[0] == 'zig':
+                    text = '0.16.0\n'
+                elif '--message-format=json' in argv:
+                    for name in ('loomterm', 'loomterm_native'):
+                        file = out / name
+                        file.write_bytes(b'synthetic, never executed')
+                        text += json.dumps(dict(reason='compiler-artifact', target=dict(name=name), executable=str(file))) + '\n'
+                    native = out / 'target/x86_64-unknown-linux-gnu/debug/build/ghostty-vt-fixture/out/zig-out/lib/libghostty-vt.a'
+                    native.parent.mkdir(parents=True)
+                    native.write_bytes(b'synthetic, never linked')
+                elif argv[0] == 'cc' and '-o' in argv and '-###' not in argv:
+                    Path(argv[argv.index('-o') + 1]).write_bytes(b'synthetic fixture, never executed')
+                elif argv[:2] == ['cargo', 'clippy']:
+                    code, text = 101, 'controlled lint failure\n'
+                if 'stdout' in kwargs:
+                    kwargs['stdout'].write(text.encode())
+                return SimpleNamespace(pid=123, wait=lambda _timeout: code)
+            with patch.object(runner, 'target', return_value='x86_64-unknown-linux-gnu'), patch.object(runner.sys, 'platform', 'linux'), patch.object(runner.shutil, 'which', return_value='synthetic-tool'), patch.object(runner.subprocess, 'Popen', side_effect=tool), patch.object(runner.sys, 'argv', ['native-test', '--evidence', str(out)]), patch.dict(runner.os.environ), patch.object(Path, 'read_text', autospec=True, side_effect=Path.read_text) as _read, patch('builtins.print'):
+                runner.os.environ.pop('LOOMTERM_NATIVE_MANIFEST', None)
+                # /etc/os-release is inventory-only; keep this unit test portable.
+                original_read = _read.side_effect
+                _read.side_effect = lambda path, *a, **kw: 'synthetic OS' if path.as_posix() == '/etc/os-release' else original_read(path, *a, **kw)
+                self.assertEqual(runner.main(), 1)
+            summary = json.loads((out / 'ci-summary.json').read_text())
+            self.assertIn('native-controller', summary['completed_phases'], summary.get('error'))
+            self.assertEqual(summary['status'], 'Fail')
+            self.assertEqual(summary['active_phase'], 'clippy')
+            self.assertIn('controlled lint failure', summary['diagnostic_tail'])
+            self.assertTrue(any('unix-native.py' in item for item in order[:-1]))
+            self.assertEqual(order[-1], 'cargo clippy')
+
     def test_case_uses_short_tmp_root_instead_of_macos_tmpdir(self):
         with tempfile.TemporaryDirectory(prefix='lt-root-policy-') as directory:
             base = Path(directory) / 'short'
@@ -41,7 +85,6 @@ class Guards(unittest.TestCase):
             with patch.object(runner, 'target', return_value='x86_64-unknown-linux-gnu'), patch.object(runner.shutil, 'which', return_value='synthetic-tool'), patch.object(runner.subprocess, 'Popen', side_effect=failing_tool), patch.object(runner.sys, 'argv', ['native-test', '--evidence', str(out)]), patch.dict(runner.os.environ), patch('builtins.print'):
                 runner.os.environ.pop('LOOMTERM_NATIVE_MANIFEST', None)
                 self.assertEqual(runner.main(), 1)
-            import json
             summary = json.loads((out / 'ci-summary.json').read_text())
             self.assertEqual(summary['status'], 'Fail')
             self.assertEqual(summary['active_phase'], 'version-rustc')

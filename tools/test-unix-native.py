@@ -113,8 +113,6 @@ def main():
         run('fmt', ['cargo', 'fmt', '--all', '--', '--check'], 120)
         run('metadata', ['cargo', 'metadata', '--locked', '--no-deps', '--format-version=1'], 180)
         run('check', ['cargo', 'check', '--workspace', '--all-targets', '--target', triple, '--locked'], 1200)
-        run('clippy', ['cargo', 'clippy', '--workspace', '--all-targets', '--target', triple,
-                       '--locked', '--', '-D', 'warnings'], 1200)
         artifacts = run('build', ['cargo', 'test', '--test', 'loomterm_native', '--target', triple,
                                   '--locked', '--no-run', '--message-format=json'], 1200)
         messages = []
@@ -158,7 +156,12 @@ def main():
         results['m2_gate'] = 'Pending'
         results['pending'] = ['signal/descendant-held PTY EOF', 'Source Folder change/name',
                               'finite slow-client resource load', 'macOS GUI coalition shutdown']
+        # Retain runtime evidence even when an independent inherited style lint
+        # fails. Clippy still runs, and its failure still fails the whole entry.
+        run('clippy', ['cargo', 'clippy', '--workspace', '--all-targets', '--target', triple,
+                       '--locked', '--', '-D', 'warnings'], 1200)
     except Exception as error:
+        results['status'] = 'Fail'
         results['error'] = repr(error)
     finally:
         (out / 'verification.json').write_text(json.dumps(results, indent=2), encoding='utf-8')
