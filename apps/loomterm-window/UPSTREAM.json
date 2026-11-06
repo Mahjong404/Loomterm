@@ -1,0 +1,13 @@
+{
+  "host": "https://github.com/wezterm/wezterm",
+  "revision": "e2a98e1b8af156988ad0ac778658ac27b60a55fb",
+  "license": "MIT",
+  "adoption": "Separate source build; no host source or binary bundled in this workspace",
+  "adapter": "../../tools/prepare-window-host.py",
+  "native_gitlinks": {
+    "deps/freetype/freetype2": "42608f77f20749dd6ddc9e0536788eaad70ea4b5",
+    "deps/freetype/libpng": "f5e92d76973a7a53f517579bc95d61483bf108c0",
+    "deps/freetype/zlib": "51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf",
+    "deps/harfbuzz/harfbuzz": "33a3f8de60dcad7535f14f07d6710144548853ac"
+  }
+}

@@ -1,0 +1,33 @@
+# Build and generated output (Cargo.lock is committed for this application).
+target/
+.zig-cache/
+zig-cache/
+zig-out/
+/build/
+/dist/
+/coverage/
+
+# Private research, toolchains, terminal captures, and AI experiments.
+/docs/local/
+/.agents/local/
+/.codex/
+.env
+.env.*
+!.env.example
+*.log
+*.tmp
+*.temp
+*.bak
+__pycache__/
+*.py[cod]
+
+# Local editor and operating-system state.
+.idea/
+.vscode/
+*.code-workspace
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
