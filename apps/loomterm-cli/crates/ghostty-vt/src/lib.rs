@@ -2006,14 +2006,14 @@ impl Terminal {
         image: ffi::GhosttyKittyGraphicsImage,
         image_id: u32,
         placement_id: u32,
-        image_width: u32,
-        image_height: u32,
+        image_size: (u32, u32),
         decoded_format: KittyImageFormat,
         needs_data: &mut F,
     ) -> Result<KittyPlacementPayload, Error>
     where
         F: FnMut(KittyImageDescriptor) -> bool,
     {
+        let (image_width, image_height) = image_size;
         let source_file = native_source::image_source(image)?;
         let (format, data_ptr, data_len, data_fingerprint) = if let Some(source) = &source_file {
             (
@@ -2117,8 +2117,7 @@ impl Terminal {
             image,
             image_id,
             placement_id,
-            image_width,
-            image_height,
+            (image_width, image_height),
             format,
             needs_data,
         )?;
@@ -2254,8 +2253,7 @@ impl Terminal {
                 image,
                 image_id,
                 placement_id,
-                image_width,
-                image_height,
+                (image_width, image_height),
                 format,
                 needs_data,
             )?;
