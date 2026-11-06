@@ -267,11 +267,11 @@ class Case:
         snapshot = self.snapshot()
         return next(p for p in snapshot['panes'] if p['pane_id'] == snapshot['focused_pane_id'])
 
-    def fixture_event(self, pane, event, **fields):
+    def fixture_event(self, pane, event, token=None, **fields):
         text = self.api('pane.read', dict(pane_id=pane['pane_id'], source='recent', lines=100))['read']['text']
         for match in re.finditer(r'\{[^{}]*\}', text.replace('\r', '').replace('\n', '')):
             value = json.loads(match.group())
-            if value.get('token') == self.token and value.get('event') == event and all(value.get(k) == v for k, v in fields.items()):
+            if value.get('token') == (token or self.token) and value.get('event') == event and all(value.get(k) == v for k, v in fields.items()):
                 self.record('fixture', value=value)
                 return value
 
@@ -360,6 +360,7 @@ def acceptance(case, concurrent):
     first.text('\x02c')
     case.shape(2, 2)
     assert Path(case.focused()['cwd']).samefile(case.source)
+    case.register(case.api('pane.process_info', dict(pane_id=case.focused()['pane_id']))['process_info']['shell_pid'], 'tab-shell')
     first.text('\x02v')
     case.shape(3, 2)
     target = case.focused()
@@ -421,6 +422,85 @@ def acceptance(case, concurrent):
                        signal_descendant_eof='Pending', launchd_gui_shutdown='Pending'))
 
 
+def exit_source_boundaries(case, _concurrent):
+    """Finite native cases; only fixture self-signals and ordinary Shell exit."""
+    case.prepare()
+    case.result['phase'] = 'boundary-start'
+    host = Host(case, 'boundary')
+    host.start()
+    host.ready()
+    initial = case.shape(1, 1)
+    workspace, original = initial['workspaces'][0], initial['panes'][0]
+    instance = case.api('ping')['capabilities']['loomterm']
+    assert instance['product'] == 'loomterm' and instance['namespace'] == case.env['LOOMTERM_SESSION']
+    case.backend = case.register(instance['pid'], 'daemon')
+    assert Path(case.backend['executable']).resolve() == case.exe
+    original_shell = case.register(case.api('pane.process_info', dict(pane_id=original['pane_id']))['process_info']['shell_pid'], 'original-shell')
+    host.visible('1')  # Then require an actual Shell response, not spawn readiness.
+    marker = 'READY_' + case.token
+    host.text("printf 'READY_%s\\n' " + case.token + '\r')
+    host.visible(marker)
+    case.result['phase'] = 'source-name-change'
+    label = '测试 项目'
+    renamed = case.api('workspace.rename', dict(workspace_id=workspace['workspace_id'], label=label))['workspace']
+    assert renamed['workspace_id'] == workspace['workspace_id'] and renamed['label'] == label
+    source = case.source.parent / "第二 中文 Source O'Neil"
+    source.mkdir()
+    updated = case.api('workspace.source.set', dict(workspace_id=workspace['workspace_id'], source_folder=str(source)))['workspace']
+    assert updated['workspace_id'] == workspace['workspace_id'] and updated['label'] == label
+    assert Path(updated['source_folder']).samefile(source)
+    retained = case.shape(1, 1)['panes'][0]
+    assert retained['terminal_id'] == original['terminal_id'] and Path(retained['cwd']).samefile(case.source)
+    assert same_process(original_shell)
+    host.text('\x02c')
+    case.shape(2, 2)
+    pane = case.focused()
+    assert Path(pane['cwd']).samefile(source)
+    shell = case.register(case.api('pane.process_info', dict(pane_id=pane['pane_id']))['process_info']['shell_pid'], 'boundary-shell')
+    host.text("printf 'CWD_%s:%s\\n' " + case.token + ' "$PWD"\r')
+    host.visible('CWD_' + case.token + ':' + str(source))
+    case.record('fixture', value=dict(event='source_change', token=case.token, stable_workspace=True,
+                                    retained_terminal=True, new_shell_cwd=True, unicode_name=True))
+    for suffix, command, status in [('a', 'EXIT7', 7), ('b', 'SIGNAL', 128 + signal.SIGTERM), ('c', 'HOLD', 0)]:
+        case.result['phase'] = 'boundary-' + command.lower()
+        token = case.token + suffix
+        host.text(shlex.quote(str(case.fixture)) + ' ' + token + '\r')
+        ready = wait_for(lambda: case.fixture_event(pane, 'ready', token=token))
+        child = case.register(ready['pid'], 'boundary-' + suffix)
+        assert ready['pgrp'] == child['pgrp'] and ready['sid'] == child['sid'] == shell['sid']
+        host.text(command + '\r')
+        event = 'tail' if command == 'EXIT7' else 'signal_tail' if command == 'SIGNAL' else 'descendant'
+        tail = wait_for(lambda: case.fixture_event(pane, event, token=token))
+        descendant = None
+        if command == 'HOLD':
+            descendant = case.register(tail['pid'], 'held-pty-descendant')
+            assert descendant['pgrp'] == child['pgrp'] and descendant['sid'] == child['sid']
+        wait_for(lambda: not same_process(child))
+        if descendant:
+            assert same_process(descendant), 'descendant must outlive its fixture parent'
+            wait_for(lambda: case.fixture_event(pane, 'descendant_tail', token=token))
+            wait_for(lambda: not same_process(descendant))
+        # The command echo contains %s, never the expected numeric response.
+        prefix = 'STATUS_' + token + '_'
+        host.text("printf '" + prefix + "%s\\n' \"$?\"\r")
+        host.visible(prefix + str(status))
+        assert same_process(shell)
+        case.record('fixture', value=dict(event='exit_boundary', token=case.token, mode=command,
+                                        status=status, parent_exited=True, shell_retained=True,
+                                        pgrp=child['pgrp'], sid=child['sid'],
+                                        descendant_exited=not descendant or not same_process(descendant)))
+    case.result['phase'] = 'natural-shell-eof'
+    host.text('exit 0\r')
+    remaining = case.shape(1, 1)
+    assert all(p['terminal_id'] != pane['terminal_id'] for p in remaining['panes'])
+    wait_for(lambda: not same_process(shell))
+    assert same_process(original_shell)
+    host.detach()
+    case.result.update(status='Pass', phase='complete', tests=dict(source_name_change='Pass',
+                       abnormal_exit='Pass', self_signal='Pass', descendant_held_pty='Pass',
+                       natural_shell_eof='Pass', abrupt_shell_with_live_descendant='Pending'))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('exe', 'host', 'fixture', 'evidence'):
@@ -432,10 +512,11 @@ def main():
         raise TimeoutError('outer watchdog requested ordinary owned cleanup')
     signal.signal(signal.SIGTERM, deadline)
     results = []
-    for label, concurrent in [('lifecycle', False), ('cold-race', True)]:
+    for label, concurrent, execute in [('lifecycle', False, acceptance), ('cold-race', True, acceptance),
+                                       ('exit-source-boundaries', False, exit_source_boundaries)]:
         case = Case(args, label)
         try:
-            acceptance(case, concurrent)
+            execute(case, concurrent)
         except Exception:
             case.result['traceback'] = traceback.format_exc()
         finally:
@@ -445,7 +526,7 @@ def main():
             break
     save(args.evidence / 'summary.json', dict(cases=results))
     print(json.dumps(dict(cases=results)))
-    return 0 if len(results) == 2 and all(r['status'] == 'Pass' for r in results) else 1
+    return 0 if len(results) == 3 and all(r['status'] == 'Pass' for r in results) else 1
 
 
 if __name__ == '__main__':

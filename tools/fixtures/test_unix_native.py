@@ -21,6 +21,38 @@ runner = module('unix_runner', Path(__file__).parents[1] / 'test-unix-native.py'
 
 
 class Guards(unittest.TestCase):
+    def test_boundary_events_require_the_new_child_token(self):
+        records = []
+        text = '\n'.join(json.dumps(dict(event='ready', token=token, pid=pid))
+                         for token, pid in [('original', 10), ('fresh', 11)])
+        case = SimpleNamespace(token='original', api=lambda *_: {'read': {'text': text}},
+                               record=lambda *args, **kwargs: records.append(kwargs))
+        result = controller.Case.fixture_event(case, dict(pane_id='pane'), 'ready', token='fresh')
+        self.assertEqual(result['pid'], 11)
+        self.assertEqual(len(records), 1)
+        self.assertIsNone(controller.Case.fixture_event(case, dict(pane_id='pane'), 'ready', token='absent'))
+
+    def test_reused_pid_cannot_satisfy_a_live_child_identity(self):
+        saved = dict(pid=10, birth='old', uid=1001, executable='/fixture')
+        with patch.object(controller, 'identity', return_value=saved | dict(birth='new', exited=False)):
+            self.assertFalse(controller.same_process(saved))
+
+    def test_all_three_native_cases_are_required_for_success(self):
+        with tempfile.TemporaryDirectory(prefix='lt-three-cases-') as directory:
+            calls = []
+            class Case:
+                def __init__(self, _args, label):
+                    self.result = dict(label=label, status='Fail')
+                def finish(self):
+                    pass
+            def passed(case, concurrent):
+                calls.append((case.result['label'], concurrent))
+                case.result['status'] = 'Pass'
+            argv = ['native', '--exe', 'exe', '--host', 'host', '--fixture', 'fixture', '--evidence', directory]
+            with patch.object(controller, 'Case', Case), patch.object(controller, 'acceptance', side_effect=passed), patch.object(controller, 'exit_source_boundaries', side_effect=passed), patch.object(controller.sys, 'argv', argv), patch.object(controller.sys, 'platform', 'linux'), patch.object(controller.signal, 'signal'), patch('builtins.print'):
+                self.assertEqual(controller.main(), 0)
+            self.assertEqual(calls, [('lifecycle', False), ('cold-race', True), ('exit-source-boundaries', False)])
+
     def test_reattach_selects_split_and_requires_child_marker_ack(self):
         commands = []
         pane = dict(pane_id='split', tab_id='tab2')
