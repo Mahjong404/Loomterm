@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -17,6 +18,53 @@ import time
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def lint_configuration(app, env):
+    """Require the byte-identical pinned config before any expensive native work."""
+    expected = next(f['sha256'] for f in json.loads((app / 'UPSTREAM.json').read_text())['files']
+                    if f['path'] == 'clippy.toml')
+    config = app / 'clippy.toml'
+    actual = digest(config) if config.is_file() else None
+    override = env.get('CLIPPY_CONF_DIR')
+    if override and Path(override).resolve() != app.resolve():
+        raise RuntimeError('Clippy configuration override points outside the production workspace')
+    if actual != expected:
+        raise RuntimeError('missing or changed pinned upstream clippy.toml in source delivery')
+    return dict(present=True, sha256=actual, fixed_upstream_sha256=expected,
+                matches_fixed_upstream=True)
+
+
+def clippy_threshold_probe(app, out, env):
+    """Prove the pinned driver reads 11: accept eleven args, reject twelve.
+
+    Uses the same cwd/environment as Cargo, without overriding config discovery.
+    Only synthetic source and compiler logs are written, beneath private evidence.
+    """
+    observations = []
+    for count in (11, 12):
+        source = out / f'clippy-threshold-{count}.rs'
+        source.write_text('pub fn probe(' + ', '.join(f'_a{i}: u8' for i in range(count)) + ') {}\n')
+        log = out / f'clippy-threshold-{count}.log'
+        argv = ['rustup', 'run', '1.96.1', 'clippy-driver', str(source),
+                '--crate-name', 'loomterm_clippy_probe', '--crate-type', 'lib',
+                '--emit=metadata', '--out-dir', str(out), '--error-format=json',
+                '-D', 'warnings']
+        with log.open('wb') as sink:
+            result = subprocess.run(argv, cwd=app, env=env, stdout=sink,
+                                    stderr=subprocess.STDOUT, timeout=30, check=False)
+        if log.stat().st_size > 1024 * 1024:
+            raise RuntimeError('Clippy threshold probe output budget exceeded')
+        messages = [json.loads(line) for line in log.read_text().splitlines() if line.startswith('{')]
+        errors = [m for m in messages if m.get('level') == 'error' and m.get('spans')]
+        expected = f'this function has too many arguments ({count}/11)'
+        rejected = any((m.get('code') or {}).get('code') == 'clippy::too_many_arguments'
+                       and m.get('message') == expected for m in errors)
+        if (count == 11 and (result.returncode != 0 or errors)) or (count == 12 and (result.returncode == 0 or not rejected)):
+            raise RuntimeError('pinned Clippy did not demonstrate the upstream threshold of 11')
+        observations.append(dict(arguments=count, exit_code=result.returncode,
+                                 expected_lint_rejection=rejected))
+    return dict(status='Pass', threshold=11, observations=observations)
 
 
 def redact_paths(text, repo, evidence):
@@ -35,6 +83,73 @@ def diagnostic_tail(path, repo, evidence):
         text = source.read(8192).decode('utf-8', errors='replace')
     text = redact_paths(text, repo, evidence)
     return text.encode('utf-8')[-8192:].decode('utf-8', errors='ignore')
+
+
+def clippy_diagnostics(path, app):
+    """Export only lint IDs, workspace locations and numeric argument counts.
+
+    Cargo's bin/test repeats collapse by location and lint. Rendered diagnostics,
+    source snippets, arbitrary messages and absolute paths never leave the log.
+    """
+    report = dict(schema=1, records=[], occurrences=0, rejected=0, truncated=False,
+                  complete=True, max_records=128, max_json_bytes=65536)
+    records = {}
+    app = app.resolve()
+    with path.open('rb') as source:
+        for line in source:
+            if not line.startswith(b'{'):
+                continue  # Cargo's own progress text is not a compiler diagnostic.
+            try:
+                item = json.loads(line)
+                if item.get('reason') != 'compiler-message':
+                    continue
+                message = item['message']
+                if message['level'] not in ('warning', 'error'):
+                    continue
+                report['occurrences'] += 1
+                code = (message.get('code') or {}).get('code') or 'rustc::uncoded'
+                if not re.fullmatch(r'[A-Za-z0-9_:]{1,96}', code):
+                    raise ValueError('noncanonical lint ID')
+                span = next(s for s in message['spans'] if s.get('is_primary'))
+                raw = Path(span['file_name'])
+                candidates = [raw] if raw.is_absolute() else [app / raw, Path(item.get('manifest_path', app / 'Cargo.toml')).parent / raw]
+                location = next(p.resolve() for p in candidates
+                                if p.resolve().is_relative_to(app) and p.is_file())
+                file = location.relative_to(app).as_posix()
+                line_number, column = int(span['line_start']), int(span['column_start'])
+                if not (0 < line_number < 10_000_000 and 0 < column < 1_000_000):
+                    raise ValueError('invalid source position')
+                key = (file, line_number, column, code)
+                if key in records:
+                    records[key]['occurrences'] += 1
+                    continue
+                record = dict(path=file, line=line_number, column=column, lint=code,
+                              end_line=int(span.get('line_end', line_number)),
+                              level=message['level'], occurrences=1)
+                counts = re.fullmatch(r'this function has too many arguments \((\d+)/(\d+)\)', message.get('message', ''))
+                if counts:
+                    record.update(actual_args=int(counts[1]), threshold=int(counts[2]))
+                symbol = re.search(r'\bfn\s+([A-Za-z_][A-Za-z0-9_]{0,127})',
+                                   '\n'.join(s.get('text', '') for s in span.get('text', [])))
+                if symbol:
+                    record['symbol'] = symbol[1]
+                if len(records) == report['max_records']:
+                    report['truncated'] = True
+                    continue
+                report['records'].append(record)
+                if len(json.dumps(report).encode()) > report['max_json_bytes']:
+                    report['records'].pop()
+                    report['truncated'] = True
+                    continue
+                records[key] = record
+            except (ValueError, KeyError, TypeError, StopIteration, OSError):
+                report['rejected'] += 1
+    report['complete'] = not report['truncated'] and report['rejected'] == 0
+    while len(json.dumps(report).encode()) > report['max_json_bytes']:
+        report['records'].pop()
+        report['truncated'] = True
+        report['complete'] = False
+    return report
 
 
 def target():
@@ -74,6 +189,12 @@ def main():
                    source_sha256={str(p.relative_to(repo)): digest(p) for p in (
                        app / 'Cargo.lock', app / 'UPSTREAM.json', app / 'crates/ghostty-vt/src/bindings.rs',
                        repo / 'tools/fixtures/unix-engine.c', repo / 'tools/fixtures/unix-native.py')})
+    config = app / 'clippy.toml'
+    config_hash = digest(config) if config.is_file() else None
+    results['lint_configuration'] = dict(present=config_hash is not None, sha256=config_hash,
+                                        matches_fixed_upstream=False)
+    if config_hash:
+        results['source_sha256']['apps/loomterm-cli/clippy.toml'] = config_hash
 
     def run(label, argv, timeout=120, cwd=app):
         # Streaming into owned files avoids unbounded in-memory compiler output.
@@ -94,13 +215,31 @@ def main():
                 raise
         if log.stat().st_size > 32 * 1024 * 1024:
             raise RuntimeError(label + ': output budget exceeded')
+        if label == 'clippy':
+            results['clippy_diagnostics'] = clippy_diagnostics(log, app)
+            if not results['clippy_diagnostics']['complete']:
+                raise RuntimeError('Clippy diagnostic export incomplete; inspect private log')
         if code:
-            results['diagnostic_tail'] = diagnostic_tail(log, repo, out)
+            if label == 'clippy':
+                # JSON source snippets/rendered text are private too. The old
+                # generic tail is only suitable for the other tool phases.
+                report = results['clippy_diagnostics']
+                results['diagnostic_tail'] = '\n'.join(
+                    f"{r['lint']} {r['path']}:{r['line']}:{r['column']}"
+                    for r in report['records'])[:8192]
+                if not report['records']:
+                    report['complete'] = False
+                    results['diagnostic_tail'] = 'Clippy failed without structured diagnostics; inspect private log'
+            else:
+                results['diagnostic_tail'] = diagnostic_tail(log, repo, out)
             raise RuntimeError(f'{label} exited {code}; see private log')
         results['completed_phases'].append(label)
         return log
 
     try:
+        results['active_phase'] = 'lint-configuration'
+        results['lint_configuration'] = lint_configuration(app, env)
+        results['completed_phases'].append('lint-configuration')
         versions = {}
         for tool, argv in [('rustc', ['rustc', '--version', '--verbose']),
                            ('cargo', ['cargo', '--version']), ('zig', ['zig', 'version']),
@@ -113,6 +252,9 @@ def main():
         assert versions['cargo'].startswith('cargo 1.96.1 '), versions['cargo']
         assert versions['zig'].strip() == '0.16.0', versions['zig']
         results['completed_phases'].append('tool-pins')
+        results['active_phase'] = 'clippy-threshold'
+        results['lint_configuration']['driver_probe'] = clippy_threshold_probe(app, out, env)
+        results['completed_phases'].append('clippy-threshold')
         if sys.platform == 'darwin':
             versions['sdk'] = run('sdk', ['xcrun', '--show-sdk-path'], 20).read_text().strip()
             versions['sdk_version'] = run('sdk-version', ['xcrun', '--show-sdk-version'], 20).read_text().strip()
@@ -163,13 +305,13 @@ def main():
         results['status'] = 'Pass' if results['controller_exit'] == 0 else 'Fail'
         if results['controller_exit'] == 0:
             results['completed_phases'].append('native-controller')
-        # A core-case Pass is not the entire M2 Gate: explicit missing assertions remain.
+        # Engineering acceptance also needs strict Clippy and evidence review.
         results['m2_gate'] = 'Pending'
-        results['pending'] = ['signal/descendant-held PTY EOF', 'Source Folder change/name',
-                              'finite slow-client resource load', 'macOS GUI coalition shutdown']
+        results['pending'] = ['abrupt Shell death with live descendants and complete descriptor accounting',
+                              'full native slow-client resource load', 'macOS launchd/GUI coalition special branches']
         # Retain runtime evidence even when an independent inherited style lint
         # fails. Clippy still runs, and its failure still fails the whole entry.
-        run('clippy', ['cargo', 'clippy', '--workspace', '--all-targets', '--target', triple,
+        run('clippy', ['cargo', 'clippy', '--workspace', '--all-targets', '--message-format=json', '--target', triple,
                        '--locked', '--', '-D', 'warnings'], 1200)
     except Exception as error:
         results['status'] = 'Fail'
@@ -187,6 +329,8 @@ def main():
                   active_phase=results['active_phase'], completed_phases=results['completed_phases'],
                   error=redact_paths(results.get('error', ''), repo, out),
                   diagnostic_tail=results.get('diagnostic_tail', ''),
+                  clippy_diagnostics=results.get('clippy_diagnostics'),
+                  lint_configuration=results['lint_configuration'],
                   tools={key: redact_paths(value, repo, out) for key, value in results.get('tools', {}).items()})
     for path in sorted(out.glob('*/result.json')):
         case = json.loads(path.read_text())
