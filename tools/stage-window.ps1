@@ -2,7 +2,9 @@
 param(
     [Parameter(Mandatory)][string]$HostSource,
     [Parameter(Mandatory)][string]$HostTarget,
-    [Parameter(Mandatory)][string]$CliExe
+    [Parameter(Mandatory)][string]$CliExe,
+    [Parameter(Mandatory)][string]$ConPtyPackage,
+    [string]$OutputDirectory
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -16,7 +18,9 @@ $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant
 if ((Get-Content -LiteralPath (Join-Path $hostDir 'loomterm-host.sha256') -Raw).Trim() -ne $hash) {
     throw 'Host binary differs from build manifest'
 }
-$out = Join-Path $repo 'target/loomterm-window/dev'
+$out = if ($OutputDirectory) { [IO.Path]::GetFullPath($OutputDirectory) } else { Join-Path $repo 'target/loomterm-window/dev' }
+& python (Join-Path $PSScriptRoot 'stage-window-conpty.py') $ConPtyPackage $out
+if ($LASTEXITCODE) { throw 'Fixed CLI ConPTY bundle staging failed' }
 New-Item -ItemType Directory -Force $out, (Join-Path $out 'host'), (Join-Path $out 'notices') | Out-Null
 Copy-Item -LiteralPath (Join-Path $repo 'target/loomterm-window/x86_64-pc-windows-msvc/debug/loomterm-window.exe') -Destination $out -Force
 Copy-Item -LiteralPath (Resolve-Path -LiteralPath $CliExe).Path -Destination (Join-Path $out 'loomterm.exe') -Force

@@ -24,6 +24,24 @@ fn verify_host(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
+fn verify_image_runtime(cli: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    // Without the adjacent bundle the CLI loader uses system ConPTY, which
+    // silently drops Kitty APC on the Windows build verified for this Window.
+    // The CLI loader remains responsible for exact hashes and native loading.
+    let dir = cli.parent().ok_or("CLI has no parent directory")?;
+    for relative in [
+        "conpty/conpty.dll",
+        "conpty/x64/OpenConsole.exe",
+        "conpty/arm64/OpenConsole.exe",
+        "conpty/herdr-conpty.json",
+    ] {
+        if !dir.join(relative).is_file() {
+            return Err(format!("Loomterm Window requires staged {relative}").into());
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 struct Options {
     host: PathBuf,
@@ -85,6 +103,9 @@ fn command(o: &Options, config: &std::path::Path) -> Command {
     }
     c.env("LOOMTERM_ROOT", &o.root)
         .env("LOOMTERM_WINDOW_ROOT", o.root.join("window"))
+        // Never allow a caller's legacy override to disable the verified
+        // app-local image path for this Window's TUI and cold-started Daemon.
+        .env_remove("HERDR_WINDOWS_CONPTY")
         .current_dir(&o.cwd)
         .args([OsString::from("--config-file"), config.as_os_str().into()])
         .args([
@@ -110,6 +131,7 @@ fn run(o: Options) -> Result<(), Box<dyn std::error::Error>> {
     let cli = fs::canonicalize(&o.cli)?;
     let host = fs::canonicalize(&o.host)?;
     verify_host(&host)?;
+    verify_image_runtime(&cli)?;
     let o = Options { cli, host, ..o };
     // Reuse the production root/session validator without starting a Daemon.
     let mut validator = Command::new(&o.cli);
@@ -198,6 +220,29 @@ mod tests {
         assert_eq!(args[1], "C:/config O'Neil.lua");
         assert!(args.contains(&std::ffi::OsStr::new("--always-new-process")));
         assert_eq!(args[args.len() - 3], o.cli.as_os_str());
+        assert!(c.get_envs().any(|(key, value)|
+            key == "HERDR_WINDOWS_CONPTY" && value.is_none()));
+    }
+
+    #[test]
+    fn window_rejects_missing_image_runtime_before_host_launch() {
+        let dir = env::temp_dir().join(format!("loomterm-image-runtime-test-{}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        let cli = dir.join("loomterm.exe");
+        fs::write(&cli, b"controlled test bytes").unwrap();
+        assert!(verify_image_runtime(&cli).is_err());
+        for relative in [
+            "conpty/conpty.dll",
+            "conpty/x64/OpenConsole.exe",
+            "conpty/arm64/OpenConsole.exe",
+            "conpty/herdr-conpty.json",
+        ] {
+            let path = dir.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"fixture").unwrap();
+        }
+        verify_image_runtime(&cli).unwrap();
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

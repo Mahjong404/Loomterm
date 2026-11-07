@@ -38,6 +38,29 @@ class SyntheticImageTests(unittest.TestCase):
                                 capture_output=True, check=True, timeout=5)
         self.assertEqual(result.stdout, b"\x1b_Ga=d,d=I,i=4242,q=2\x1b\\")
 
+    def test_replacement_keeps_image_identity_but_changes_pixels(self):
+        original = fixture.png()
+        alternate = fixture.png(alternate=True)
+        self.assertNotEqual(original, alternate)
+        output = subprocess.run([sys.executable, str(source), "--replace"],
+                                capture_output=True, check=True, timeout=5).stdout
+        self.assertTrue(output.startswith(b"\x1b[H\x1b_Ga=T,f=100,i=4242,q=2,c=8,r=4;"))
+        self.assertIn(b"M3_PNG_REPLACE", output)
+        self.assertIn(__import__("base64").b64encode(alternate), output)
+
+    def test_invalid_replacement_is_bounded_truncated_png(self):
+        output = subprocess.run([sys.executable, str(source), "--invalid"],
+                                capture_output=True, check=True, timeout=5).stdout
+        self.assertTrue(output.startswith(b"\x1b[H\x1b_Ga=T,f=100,i=4242,q=2,c=8,r=4;"))
+        self.assertIn(__import__("base64").b64encode(fixture.png()[:len(fixture.png()) // 2]), output)
+        self.assertLess(len(output), 1024)
+
+    def test_overbudget_png_is_compact_but_decodes_above_64_mib(self):
+        data = fixture.overbudget_png()
+        self.assertEqual(struct.unpack(">II", data[16:24]), (4097, 4096))
+        self.assertGreater(4097 * 4096 * 4, 64 * 1024 * 1024)
+        self.assertLess(len(data), 200_000)
+
 
 if __name__ == "__main__":
     unittest.main()

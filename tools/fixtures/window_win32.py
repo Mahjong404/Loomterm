@@ -104,6 +104,11 @@ class Window:
     def focus(self):
         self.check()
         u.SetForegroundWindow(self.hwnd)
+        # Cross-input-queue foreground activation can complete asynchronously.
+        # Wait briefly for the real foreground result; never bypass the guard.
+        until = time.monotonic() + .5
+        while u.GetForegroundWindow() != self.hwnd and time.monotonic() < until:
+            time.sleep(.01)
         assert u.GetForegroundWindow() == self.hwnd, "owned window did not receive foreground; input skipped"
 
     def native_text(self, text):
@@ -117,7 +122,8 @@ class Window:
 
     def native_key(self, *keys):
         self.focus()
-        inject([keyboard(key, 0, 0) for key in keys] + [keyboard(key, 0, 2) for key in reversed(keys)])
+        inject([keyboard(key, u.MapVirtualKeyW(key, 0), 0) for key in keys]
+               + [keyboard(key, u.MapVirtualKeyW(key, 0), 2) for key in reversed(keys)])
 
     def native_click(self, x, y):
         self.focus()
@@ -178,6 +184,8 @@ u.SetForegroundWindow.argtypes = [w.HWND]
 u.ClientToScreen.argtypes = [w.HWND, c.POINTER(w.POINT)]
 u.SendInput.argtypes = [w.UINT, c.POINTER(INPUT), c.c_int]
 u.SendInput.restype = w.UINT
+u.MapVirtualKeyW.argtypes = [w.UINT, w.UINT]
+u.MapVirtualKeyW.restype = w.UINT
 
 
 def keyboard(vk, scan, flags):

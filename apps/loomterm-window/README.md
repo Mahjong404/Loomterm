@@ -32,11 +32,15 @@ python tools/prepare-window-host.py $hostSource
 ./tools/build-window.ps1 -HostSource $hostSource -HostTarget $hostTarget -Controller
 ```
 
-The preparation checks exact original Git blob hashes, applies the two-file
-adapter, and writes a fixed version stamp. `--verify` checks the prepared
-source. [The review patch](patches/0001-host-adapter.patch) and
-[ledger](PATCHES.md) show the seam. Do not apply the patch a second time after
-running preparation. No renderer, font system, multiplexer or VT rewrite.
+The preparation checks four exact original Git blob hashes, applies the
+Window adapter and writes a fixed version stamp. `--verify` checks a prepared
+copy. An exact adapter-v1 copy can use `--upgrade-input` once; a pristine copy
+uses the normal command above. Review patches
+[1](patches/0001-host-adapter.patch),
+[2](patches/0002-windows-utf16-input.patch),
+[3](patches/0003-win32-utf16-records.patch) and the [ledger](PATCHES.md)
+show every seam. Do not apply the patches again after preparation.
+No renderer, font system, multiplexer or VT rewrite.
 
 Build the CLI in its independent workspace so Cargo selects its configuration:
 
@@ -53,7 +57,11 @@ are checked into the Window change.
 ## Run without another terminal
 
 ```powershell
-./tools/stage-window.ps1 -HostSource $hostSource -HostTarget $hostTarget -CliExe ABS_LOOMTERM_EXE
+$conpty = Get-Content apps/loomterm-window/conpty.json -Raw | ConvertFrom-Json
+$package = Join-Path $PWD 'target/window-inputs/Microsoft.Windows.Console.ConPTY.1.24.260710001.nupkg'
+New-Item -ItemType Directory -Force (Split-Path $package) | Out-Null
+Invoke-WebRequest -Uri $conpty.package.url -OutFile $package
+./tools/stage-window.ps1 -HostSource $hostSource -HostTarget $hostTarget -CliExe ABS_LOOMTERM_EXE -ConPtyPackage $package
 ```
 
 Open `target/loomterm-window/dev/loomterm-window.exe` directly in Explorer. The
@@ -68,8 +76,9 @@ For controlled tests or an explicit Source Folder, use a Windows shortcut or:
 ```
 
 `--host` and `--cli` override adjacent binary paths. `--check` validates the
-build-produced host SHA manifest and CLI root/session without starting a Window
-or Daemon. It initializes product paths through the CLI. The SHA manifest guards
+build-produced host SHA manifest, adjacent ConPTY bundle presence and CLI
+root/session without starting a Window or Daemon. It initializes product paths
+through the CLI. The SHA manifest guards
 accidental binary replacement; it is not an authenticated installer/signature.
 
 The launcher writes per-process internal Lua under `ProductRoot/window`, waits
@@ -95,12 +104,18 @@ Pop-Location
 python -m unittest discover -s tools/fixtures -p 'test_window_*.py' -v
 ```
 
+Run these from the pinned Rust 1.96.1 workspace and set
+`WINDOW_CONPTY_PACKAGE` to the verified fixed package before the Python suite
+to exercise its real staging case. The local 1.96.1 installation used for M3
+lacked rustfmt and Clippy components; their pinned checks remain unverified.
+
 The native fixture uses Python 3.12+ and Pillow for optional bitmap captures.
 Build a bounded query child and run the exact-PID Windows fixture:
 
 ```powershell
 cl /nologo /std:c17 /W4 /WX /O2 /MT tools/fixtures/window-query.c /Fe:target/window-query.exe /Fo:target/window-query.obj
 python tools/fixtures/window-native.py --launcher target/loomterm-window/dev/loomterm-window.exe --host target/loomterm-window/dev/host/wezterm-gui.exe --control ABS_HOST_TARGET/x86_64-pc-windows-msvc/debug/wezterm.exe --exe ABS_LOOMTERM_EXE --shell ABS_PWSH_EXE --fixture target/window-query.exe --evidence docs/local/window-validation
+python tools/fixtures/window-image-native.py --launcher target/loomterm-window/dev/loomterm-window.exe --host target/loomterm-window/dev/host/wezterm-gui.exe --control ABS_HOST_TARGET/x86_64-pc-windows-msvc/debug/wezterm.exe --exe target/loomterm-window/dev/loomterm.exe --shell ABS_PWSH_EXE --fixture tools/fixtures/window-image.py --evidence docs/local/window-validation
 ```
 
 The fixture uses a fresh short owned Root, disabled Shell profiles, explicit
@@ -110,6 +125,12 @@ real native resize path; system `SC_CLOSE` uses the titlebar/system-menu close
 route. `PrintWindow` screenshots are separate visual evidence candidates.
 Native input is opt-in with `--input` and is skipped unless the exact owned
 HWND receives foreground. Do not use input success to infer IME behavior.
+The image fixture requires the staged CLI beside its fixed ConPTY bundle,
+checks the backend's actually loaded DLL, and captures only its owned Window.
+It certifies a single checker PNG's stated assertions. To inspect work-process
+UTF-8 output independently of text entry, run `tools/fixtures/window-text.py`
+inside the work Pane. `window-input.c` is a separate bounded raw-byte fixture;
+its output does not establish candidate-window or font correctness.
 
 | Scope | Current result |
 | --- | --- |
@@ -117,22 +138,48 @@ HWND receives foreground. Do not use input success to infer IME behavior.
 | Native HWND/DPI, four physical window sizes including responsive layout, outer grid/TUI/inner PTY propagation | Passed on Windows at DPI 144 |
 | Native system close, no-client XTVERSION continuation, same Daemon/Shell/Terminal reattach | Passed |
 | Actual bitmap capture | Available through Win32 PrintWindow; not a blanket visual Pass |
-| Repeated-resize visual stability | Long PowerShell prompt/reflow residuals observed; unresolved |
-| Native key/mouse/OS Clipboard/IME and independent scrolling | Pending; foreground-guard skips and one failed opt-in Unicode round-trip attempt are retained; no native input Pass claimed |
-| CJK/emoji/combining/wide-cell rendering | Chinese and composed é visible in a captured sample; Emoji absent there; full width/cursor/IME acceptance remains incomplete |
-| Kitty PNG across both terminal layers | Fail: source emits APC, current inner system ConPTY preserves the text marker but drops Kitty APC before the engine/TUI |
+| Repeated-resize visual stability | Five native sizes retain the long prompt in inner/outer text; inspected candidate screenshots show no obvious residual. Prior residual is retained; wider visual/cursor acceptance remains Pending |
+| Native keyboard and raw-console compatibility | Foreground click, ASCII and Alt+x reached the work process; Shift/Ctrl/F6/CJK/Emoji raw-reader assertions failed. The host disables default key bindings except Clipboard shortcuts, so these failures cannot be attributed to host shortcut interception. The M2 candidate preserves WM_CHAR Emoji in a real PowerShell string; direct Daemon input still becomes four replacement characters in inner ConPTY raw ReadFile even at UTF-8 CP 65001 and input mode 0x280. These failures remain open |
+| IME, OS Clipboard and mouse titlebar close | Maintainer reports preedit/candidates, Esc cancel, Chinese commit, Shift-drag selection, Ctrl+Shift+C/V copy/paste, and titlebar X normal in the fixed local candidate. Same Shell reattach after X is verified. A small bracketed-paste protocol case passes; large/cancel/disconnect and independent native scrolling remain open |
+| CJK/emoji/combining/wide-cell rendering | CJK, combining text, Emoji and ZWJ are visible; engine cell-width probes pass. Maintainer confirms CJK/Emoji glyphs in the manual case. Multi-font/DPI and full cursor/layout acceptance remain incomplete |
+| Kitty PNG across both terminal layers | Fixed Microsoft ConPTY 1.24.260710001 preserves the exact APC. The 32x32 checker displays, resizes, scrolls out, redraws, replaces at the same ID/position and repeats; truncated replacement and a decoded image above 64 MiB do not draw. Two Windows each render it; closing one leaves the other and its Shell intact. Visible error feedback and resource reclamation remain Pending |
 
-The PNG diagnostic used the unchanged adopted PTY library and only answered
-its initial CPR handshake. The synthetic child exited successfully; the raw
-PTY stream lacked Kitty APC. Investigate the approved Windows ConPTY bundle/
-passthrough options at both layers before changing any renderer. No common
-CLI/Daemon/native-PTY semantics are changed by this Window branch.
+The current system ConPTY drops PNG APC even with passthrough; the fixed
+package in [conpty.json](conpty.json) preserves it through the CLI's existing
+production loader. Staging verifies the package, three native files and legal
+notices, keeps the bundle adjacent to the CLI and never replaces system DLLs.
+The Window launcher checks that all four adjacent bundle files are present
+before opening the host and removes the inherited legacy system-ConPTY override.
+The production CLI loader verifies exact file hashes. A missing bundle therefore
+fails Window startup explicitly instead of silently losing Kitty images. This
+does not alter an already-running Daemon that was started separately with a
+different ConPTY selection. Only Windows 11 has been exercised; the minimum OS
+for the separately distributed DLL and complete redistribution inventory remain
+unverified release checks.
+No common CLI/Daemon/native-PTY source is changed by this Window branch.
+The standalone PTY probe answers startup CPR only; separate live Window tests
+establish actual image rendering. One image does not prove all lifecycle cases.
+
+The local input integration also tested an M2-owned CLI candidate with SHA-256
+40069dd7513bac85a6eacbd9d2d409fbd97140f63c968c5f9e8d5ad4cb90c7c7,
+derived from the stated M2 base plus its input-state fix. That fix separates
+serialized UTF-16 state from ASCII wrapper input. It has not changed this
+branch's dependency ref or public build base. The fixed-base build retains its
+known supplementary-input defect until the dependency fix is reviewed and
+published by its owner; do not claim the local candidate is already in this PR.
 
 The host GUI socket retains the upstream Windows AF_UNIX path-length limit.
 A long controlled Root produced a scoped warning while TUI operation continued;
 use a short test Root for host-control measurements. No personal runtime fallback.
-Native fonts/DPI combinations, image resize/scroll/delete, sustained slow-client
-recovery, performance and release redistribution remain separate gates.
+Native fonts/DPI combinations, visible malformed/oversized image errors,
+bounded render-resource accounting, sustained slow-client recovery, performance
+and release redistribution remain separate gates. A two-Window native wheel
+message probe found a shared scroll offset: scrolling one Window also moved the
+other. The shared CLI/Daemon PaneScroll owner must repair this; it is not a
+Window host setting. A small bracketed paste reached a raw work process with
+the exact start/end markers and Chinese/control-text payload; newline was
+normalized to CRLF by inner ConPTY. Large, cancelled and disconnected pastes
+remain Pending.
 
 ## Short manual completion check
 
@@ -147,7 +194,9 @@ recovery, performance and release redistribution remain separate gates.
 
 The deterministic image input is `tools/fixtures/window-image.py`. Run it inside
 an actual work Pane to emit a 32x32 Kitty PNG; `--output` writes the source PNG,
-`--delete` removes its image ID. A matching host screenshot is required before
+`--replace` repeats the image ID with alternate pixels, `--invalid` emits a truncated
+replacement, `--overbudget` emits a compact PNG above the 64 MiB decoded-image
+budget, and `--delete` removes its image ID. A matching host screenshot is required before
 claiming end-to-end image rendering. Reader work must not replace this check.
 
 ## Licenses and distribution
@@ -157,5 +206,8 @@ Apache-2.0. The separately acquired host is MIT; its original
 [notice](../../third-party/licenses/wezterm/LICENSE.md) is retained here for the
 adapter. Keep all source/native/font/MS console/ANGLE/Mesa notices with acquired
 inputs and local staging. The adopted CLI retains its own Apache-2.0 license.
+The app-local Microsoft ConPTY package is MIT; retain its
+[license](../../third-party/licenses/microsoft-conpty/LICENSE.txt) and
+[NOTICE](../../third-party/licenses/microsoft-conpty/NOTICE.md) alongside it.
 The local staging helper retains available source notices, but does not certify
 a complete transitive binary/font redistribution inventory or installer identity.
