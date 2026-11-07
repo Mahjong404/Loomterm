@@ -1,0 +1,73 @@
+--- a/config/src/config.rs
++++ b/config/src/config.rs
+@@ -1757,27 +1757,30 @@
+ }
+ 
+ pub(crate) fn compute_cache_dir() -> anyhow::Result<PathBuf> {
+-    if let Some(runtime) = dirs_next::cache_dir() {
+-        return Ok(runtime.join("wezterm"));
+-    }
+-
+-    Ok(crate::HOME_DIR.join(".local/share/wezterm"))
++    // Loomterm Window adapter v1. Preserve ordinary Shell HOME/tool storage.
++    let root = std::env::var_os("LOOMTERM_WINDOW_ROOT")
++        .ok_or_else(|| anyhow::anyhow!("LOOMTERM_WINDOW_ROOT is required"))?;
++    let root = PathBuf::from(root);
++    anyhow::ensure!(root.is_absolute(), "Window root must be absolute");
++    Ok(root.join("cache"))
+ }
+ 
+ pub(crate) fn compute_data_dir() -> anyhow::Result<PathBuf> {
+-    if let Some(runtime) = dirs_next::data_dir() {
+-        return Ok(runtime.join("wezterm"));
+-    }
+-
+-    Ok(crate::HOME_DIR.join(".local/share/wezterm"))
++    // Loomterm Window adapter v1. Preserve ordinary Shell HOME/tool storage.
++    let root = std::env::var_os("LOOMTERM_WINDOW_ROOT")
++        .ok_or_else(|| anyhow::anyhow!("LOOMTERM_WINDOW_ROOT is required"))?;
++    let root = PathBuf::from(root);
++    anyhow::ensure!(root.is_absolute(), "Window root must be absolute");
++    Ok(root.join("data"))
+ }
+ 
+ pub(crate) fn compute_runtime_dir() -> anyhow::Result<PathBuf> {
+-    if let Some(runtime) = dirs_next::runtime_dir() {
+-        return Ok(runtime.join("wezterm"));
+-    }
+-
+-    Ok(crate::HOME_DIR.join(".local/share/wezterm"))
++    // Loomterm Window adapter v1. Preserve ordinary Shell HOME/tool storage.
++    let root = std::env::var_os("LOOMTERM_WINDOW_ROOT")
++        .ok_or_else(|| anyhow::anyhow!("LOOMTERM_WINDOW_ROOT is required"))?;
++    let root = PathBuf::from(root);
++    anyhow::ensure!(root.is_absolute(), "Window root must be absolute");
++    Ok(root.join("runtime"))
+ }
+ 
+ pub fn pki_dir() -> anyhow::Result<PathBuf> {
+--- a/wezterm-gui/src/main.rs
++++ b/wezterm-gui/src/main.rs
+@@ -827,6 +827,13 @@
+ }
+ 
+ fn main() {
++    // Loomterm adapter v1. Probe before logging/config or native resources.
++    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--loomterm-window-contract")) {
++        std::process::exit(42);
++    }
++    let root = std::env::var_os("LOOMTERM_WINDOW_ROOT")
++        .expect("start through loomterm-window");
++    assert!(std::path::Path::new(&root).is_absolute(), "Window root must be absolute");
+     #[cfg(feature = "dhat-heap")]
+     let _profiler = dhat::Profiler::new_heap();
+ 
+@@ -1172,7 +1179,7 @@
+     {
+         unsafe {
+             ::windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID(
+-                ::windows::core::PCWSTR(wide_string("org.wezfurlong.wezterm").as_ptr()),
++                ::windows::core::PCWSTR(wide_string("org.loomterm.window").as_ptr()),
+             )
+             .unwrap();
+         }

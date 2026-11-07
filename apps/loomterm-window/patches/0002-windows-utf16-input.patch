@@ -1,0 +1,144 @@
+--- a/window/src/os/windows/window.rs
++++ b/window/src/os/windows/window.rs
+@@ -20,7 +20,7 @@
+ use std::any::Any;
+ use std::cell::RefCell;
+ use std::collections::HashMap;
+-use std::convert::TryInto;
++use std::convert::{TryFrom, TryInto};
+ use std::ffi::OsString;
+ use std::io::{self, Error as IoError};
+ use std::num::NonZeroIsize;
+@@ -116,6 +116,7 @@
+     last_size: Option<Dimensions>,
+     in_size_move: bool,
+     dead_pending: Option<(Modifiers, u32)>,
++    pending_utf16: Option<u16>,
+     saved_placement: Option<WINDOWPLACEMENT>,
+     track_mouse_leave: bool,
+     window_drag_position: Option<ScreenPoint>,
+@@ -540,6 +541,7 @@
+             last_size: None,
+             in_size_move: false,
+             dead_pending: None,
++            pending_utf16: None,
+             saved_placement: None,
+             track_mouse_leave: false,
+             window_drag_position: None,
+@@ -1601,10 +1603,10 @@
+     _wparam: WPARAM,
+     _lparam: LPARAM,
+ ) -> Option<LRESULT> {
+-    rc_from_hwnd(hwnd)?
+-        .borrow_mut()
+-        .events
+-        .dispatch(WindowEvent::FocusChanged(false));
++    let window = rc_from_hwnd(hwnd)?;
++    let mut inner = window.borrow_mut();
++    inner.pending_utf16 = None;
++    inner.events.dispatch(WindowEvent::FocusChanged(false));
+     None
+ }
+ 
+@@ -2327,7 +2329,7 @@
+                 }
+ 
+                 // Found a Dead key.
+-                let dead_char = std::char::from_u32_unchecked(out[0] as u32);
++                let dead_char = std::char::from_u32(out[0] as u32).unwrap_or('\u{fffd}');
+ 
+                 let mut map = HashMap::new();
+ 
+@@ -2363,7 +2365,7 @@
+ 
+                         if ret == 1 {
+                             // Found a combination
+-                            let c = std::char::from_u32_unchecked(out[0] as u32);
++                            let c = std::char::from_u32(out[0] as u32).unwrap_or('\u{fffd}');
+                             // clock through again to get the base
+                             ToUnicode(
+                                 ik,
+@@ -2373,7 +2375,7 @@
+                                 out.len() as i32,
+                                 0,
+                             );
+-                            let base = std::char::from_u32_unchecked(out[0] as u32);
++                            let base = std::char::from_u32(out[0] as u32).unwrap_or('\u{fffd}');
+ 
+                             if ((smod == Modifiers::CTRL)
+                                 || (smod == Modifiers::CTRL | Modifiers::SHIFT))
+@@ -2504,6 +2506,41 @@
+         pt: POINT { x: 0, y: 0 },
+         time: GetTickCount(),
+     });
++}
++
++// Loomterm adapter: WM_CHAR carries UTF-16 code units, not Unicode scalars.
++fn decode_windows_char(pending: &mut Option<u16>, value: usize) -> Option<char> {
++    let Ok(unit) = u16::try_from(value) else {
++        *pending = None;
++        return None;
++    };
++    if (0xd800..=0xdbff).contains(&unit) {
++        *pending = Some(unit);
++        return None;
++    }
++    let high = pending.take();
++    if (0xdc00..=0xdfff).contains(&unit) {
++        return high.and_then(|high| char::from_u32(
++            0x10000 + ((u32::from(high) - 0xd800) << 10) + u32::from(unit) - 0xdc00));
++    }
++    char::from_u32(u32::from(unit))
++}
++
++#[cfg(test)]
++mod loomterm_utf16_tests {
++    use super::decode_windows_char;
++    #[test]
++    fn character_messages_pair_surrogates_and_recover_from_invalid_units() {
++        let mut pending = None;
++        assert_eq!(decode_windows_char(&mut pending, 0x4e2d), Some('中'));
++        assert_eq!(decode_windows_char(&mut pending, 0xd83d), None);
++        assert_eq!(decode_windows_char(&mut pending, 0xde00), Some('😀'));
++        assert_eq!(decode_windows_char(&mut pending, 0xde00), None);
++        assert_eq!(decode_windows_char(&mut pending, 0xd83d), None);
++        assert_eq!(decode_windows_char(&mut pending, 65), Some('A'));
++        assert_eq!(decode_windows_char(&mut pending, usize::MAX), None);
++        assert_eq!(pending, None);
++    }
+ }
+ 
+ unsafe fn key(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
+@@ -2660,10 +2697,10 @@
+         // If we were sent a character by the IME, some other apps,
+         // or by ourselves via TranslateMessage, then take that
+         // value as-is.
+-        (
+-            Some(KeyCode::Char(std::char::from_u32_unchecked(wparam as u32))),
+-            None,
+-        )
++        let Some(character) = decode_windows_char(&mut inner.pending_utf16, wparam) else {
++            return Some(0);
++        };
++        (Some(KeyCode::Char(character)), None)
+     } else {
+         // Otherwise we're dealing with a raw key message.
+         // ToUnicode has frustrating statefulness so we take care to
+@@ -2818,7 +2855,7 @@
+                     );
+ 
+                     match res {
+-                        1 => Some(std::char::from_u32_unchecked(out[0] as u32)),
++                        1 => std::char::from_u32(out[0] as u32),
+                         0 => Some('\x00'),
+                         _ => None,
+                     }
+@@ -2847,7 +2884,7 @@
+                 );
+ 
+                 let key = match res {
+-                    1 => Some(KeyCode::Char(std::char::from_u32_unchecked(out[0] as u32))),
++                    1 => std::char::from_u32(out[0] as u32).map(KeyCode::Char),
+                     // No mapping, so use our raw info
+                     0 => {
+                         log::trace!(
