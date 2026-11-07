@@ -1283,6 +1283,9 @@ async fn run_client_loop(
             ClientLoopEvent::TerminalUnavailable(err) => {
                 info!(err = %err, "client terminal unavailable; detaching");
                 let _ = write_to_server(&mut write_stream, &ClientMessage::Detach);
+                if err.kind() == io::ErrorKind::OutOfMemory {
+                    return Err(ClientError::ConnectionLost(err));
+                }
                 return Ok(());
             }
             ClientLoopEvent::Resize(
