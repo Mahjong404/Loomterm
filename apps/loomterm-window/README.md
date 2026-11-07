@@ -5,6 +5,8 @@ terminal TUI in a dedicated native Windows host and connects to the same
 Loomterm Daemon as Loomterm CLI. It adds no Workspace or work-terminal owner.
 
 This branch depends on M2 commit `56b0ae5f7b0c2e6a1c9fcc30dc313bbcabc0022b`.
+The M2 branch has since advanced to `3e29975e0e5e8549d04ed340314a5f624b408716`;
+this Window branch has not been rebased or rebuilt on that commit.
 M2's formal quality gate is also Pending. Publication is for source review, not
 an installer, release, or claim that native GUI acceptance is complete.
 
@@ -165,8 +167,10 @@ The local input integration also tested an M2-owned CLI candidate with SHA-256
 derived from the stated M2 base plus its input-state fix. That fix separates
 serialized UTF-16 state from ASCII wrapper input. It has not changed this
 branch's dependency ref or public build base. The fixed-base build retains its
-known supplementary-input defect until the dependency fix is reviewed and
-published by its owner; do not claim the local candidate is already in this PR.
+known supplementary-input defect. The M2 owner has now published a subsequent
+input fix on its branch, but the exact local candidate binary was never published
+and this Window branch has not been rebuilt or GUI-regressed against that commit.
+Do not claim the updated dependency is already integrated here.
 
 The host GUI socket retains the upstream Windows AF_UNIX path-length limit.
 A long controlled Root produced a scoped warning while TUI operation continued;

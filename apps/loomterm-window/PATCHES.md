@@ -36,8 +36,10 @@ Windows character decoding, and Win32 UTF-16 serialization. The latter's unit
 test and real outer-PTY byte capture pass. BMP/combining WM_CHAR reaches the
 work process. With M2's separately owned input-state fix, supplementary input
 also reaches an actual PowerShell string as exact UTF-8. The original fixed
-M2 binary still drops it; the local candidate is an unpublished dependency,
-with no automatic PR base change. A raw ReadFile console-mode test still yields
+M2 binary still drops it. The M2 owner has since published its input fix in a
+later M2 branch commit, but this Window branch remains on its fixed older base
+and its exact local candidate binary is not a published dependency. No automatic
+PR rebase or GUI recheck is implied. A raw ReadFile console-mode test still yields
 replacement characters with verified input CP 65001 and mode 0x280; native
 SendInput chord tests also have failures.
 This is a partial repair, not complete native Unicode input acceptance.
