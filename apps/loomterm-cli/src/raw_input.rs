@@ -199,6 +199,10 @@ fn events_from_framed_chunks(chunks: Vec<Vec<u8>>) -> Vec<RawInputEvent> {
 #[derive(Default)]
 pub(crate) struct RawInputByteFramer {
     buffer: Vec<u8>,
+    bracketed_paste_scan_from: usize,
+    bracketed_paste_end: Option<usize>,
+    #[cfg(test)]
+    bracketed_paste_scan_steps: usize,
     discard_until: Option<ControlStringFamily>,
     discarded_tail_bytes: usize,
     // Keep the discarded prefix separate from continuation bytes awaiting validation.
@@ -261,6 +265,10 @@ impl RawInputByteFramer {
     pub(crate) fn push(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
         if data.is_empty() {
             return self.push_extended();
+        }
+        if !self.buffer.starts_with(BRACKETED_PASTE_START) {
+            self.bracketed_paste_scan_from = BRACKETED_PASTE_START.len();
+            self.bracketed_paste_end = None;
         }
         // Bytes after the idle limit are never part of the abandoned reply.
         self.drop_abandoned_host_color_reply();
@@ -469,8 +477,31 @@ impl RawInputByteFramer {
 
     #[cfg(any(windows, test))]
     pub(crate) fn has_pending_bracketed_paste(&self) -> bool {
-        self.buffer.starts_with(BRACKETED_PASTE_START)
-            && find_subsequence(&self.buffer, BRACKETED_PASTE_END).is_none()
+        self.buffer.starts_with(BRACKETED_PASTE_START) && self.bracketed_paste_end.is_none()
+    }
+
+    fn find_bracketed_paste_end(&mut self) -> Option<usize> {
+        if let Some(end) = self.bracketed_paste_end {
+            return Some(end);
+        }
+        let last_start = self.buffer.len().checked_sub(BRACKETED_PASTE_END.len())?;
+        let first_start = self
+            .bracketed_paste_scan_from
+            .max(BRACKETED_PASTE_START.len());
+        for start in first_start..=last_start {
+            #[cfg(test)]
+            {
+                self.bracketed_paste_scan_steps += 1;
+            }
+            if self.buffer[start..].starts_with(BRACKETED_PASTE_END) {
+                self.bracketed_paste_end = Some(start);
+                return Some(start);
+            }
+        }
+        self.bracketed_paste_scan_from = last_start
+            .saturating_add(1)
+            .max(BRACKETED_PASTE_START.len());
+        None
     }
 
     pub(crate) fn flush_timeout(&mut self) -> Vec<Vec<u8>> {
@@ -564,7 +595,7 @@ impl RawInputByteFramer {
         }
 
         if self.buffer.starts_with(BRACKETED_PASTE_START)
-            && find_subsequence(&self.buffer, BRACKETED_PASTE_END).is_none()
+            && self.find_bracketed_paste_end().is_none()
         {
             tracing::trace!(
                 len = self.buffer.len(),
@@ -860,7 +891,21 @@ impl RawInputByteFramer {
                 continue;
             }
 
-            let Some((event, consumed)) = extract_one_event(&self.buffer) else {
+            let extracted = if self.buffer.starts_with(BRACKETED_PASTE_START) {
+                self.find_bracketed_paste_end().and_then(|end| {
+                    let content =
+                        std::str::from_utf8(&self.buffer[BRACKETED_PASTE_START.len()..end]).ok()?;
+                    Some((
+                        RawInputEvent::Paste(content.to_owned()),
+                        end + BRACKETED_PASTE_END.len(),
+                    ))
+                })
+            } else {
+                self.bracketed_paste_scan_from = BRACKETED_PASTE_START.len();
+                self.bracketed_paste_end = None;
+                extract_one_event(&self.buffer)
+            };
+            let Some((event, consumed)) = extracted else {
                 break;
             };
             if matches!(
@@ -888,6 +933,10 @@ impl RawInputByteFramer {
             self.held_pending_host_reply_esc = false;
             chunks.push(self.buffer[..consumed].to_vec());
             self.buffer.drain(..consumed);
+            if matches!(event, RawInputEvent::Paste(_)) {
+                self.bracketed_paste_scan_from = BRACKETED_PASTE_START.len();
+                self.bracketed_paste_end = None;
+            }
         }
 
         chunks
@@ -2808,6 +2857,37 @@ mod tests {
             panic!("expected paste");
         };
         assert_eq!(text, "hello");
+    }
+
+    #[test]
+    fn bracketed_paste_framing_scans_incrementally_across_small_reads() {
+        for payload_bytes in [301, 4_501, 16 * 1024] {
+            let mut payload = "界😀\n\r\x01\x1b[31m".to_owned();
+            payload.push_str(&"x".repeat(payload_bytes - payload.len()));
+            assert_eq!(payload.len(), payload_bytes);
+
+            let mut expected = BRACKETED_PASTE_START.to_vec();
+            expected.extend_from_slice(payload.as_bytes());
+            expected.extend_from_slice(BRACKETED_PASTE_END);
+
+            let mut framer = RawInputByteFramer::default();
+            let mut chunks = Vec::new();
+            for byte in &expected {
+                if framer.has_pending_bracketed_paste() {
+                    assert!(framer.flush_timeout().is_empty());
+                }
+                chunks.extend(framer.push(std::slice::from_ref(byte)));
+            }
+
+            assert_eq!(chunks, vec![expected]);
+            assert!(
+                framer.bracketed_paste_scan_steps <= payload_bytes + 1,
+                "scanned {} candidate positions for {payload_bytes} payload bytes",
+                framer.bracketed_paste_scan_steps
+            );
+            let events = events_from_framed_chunks(chunks);
+            assert!(matches!(events.as_slice(), [RawInputEvent::Paste(text)] if text == &payload));
+        }
     }
 
     #[test]

@@ -431,6 +431,34 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn long_shell_paste_is_one_ordered_bracketed_pty_input_message() {
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80,
+                24,
+                0,
+                b"\x1b[?2004h",
+                4,
+            );
+        let text = "界😀\x01\x1b[31m".to_owned() + &"x".repeat(16 * 1024);
+        assert!(runtime.bracketed_paste_enabled());
+
+        assert!(test_apply_client_pane_input_events(
+            &runtime,
+            &[ClientPaneInputEvent::Paste(text.clone())],
+        )
+        .is_ok());
+
+        let actual = input_rx
+            .recv()
+            .await
+            .expect("paste reaches PTY input queue");
+        let expected = format!("\x1b[200~{text}\x1b[201~");
+        assert_eq!(actual.as_ref(), expected.as_bytes());
+        assert!(input_rx.try_recv().is_err(), "paste remains one queue item");
+    }
+
+    #[tokio::test]
     async fn terminal_attach_stale_geometry_falls_back_to_the_canonical_cell() {
         let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(20, 5, b"");
         let position = crate::protocol::ClientMousePosition::Pixels {
