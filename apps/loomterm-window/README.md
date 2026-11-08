@@ -187,8 +187,8 @@ larger paste length and FNV-1a digest through the complete Window path: 301,
 1,141 and 2,261 bytes passed, taking 0.39, 2.25 and 8.39 seconds respectively.
 A 4,501-byte paste returned success from the host control command but the
 reader received zero bytes before its 15-second watchdog; a raw prewrapped
-write behaved likewise. This suggests superlinear buffering or framing, but
-the exact boundary remains under M2-owned CLI diagnosis. Cancelled/disconnected
+write behaved likewise. Latency rises sharply across these sizes, but the
+exact bottleneck and layer remain under M2-owned CLI diagnosis. Cancelled/disconnected
 pastes remain Pending.
 
 ## Short manual completion check

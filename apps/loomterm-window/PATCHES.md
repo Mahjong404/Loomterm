@@ -84,6 +84,7 @@ No fourth host patch was added for large paste. An M3-owned 256 KiB-capped raw
 work-process fixture records paste delimiters, bytes and FNV-1a. In a real Window
 using candidate 463df14d, 301/1,141/2,261-byte pastes pass in 0.39/2.25/8.39
 seconds; 4,501 bytes produce no complete event within 15 seconds. The same
-4,501-byte raw prewrapped input also stalls. The suspected growing-buffer scan
-belongs to M2's shared client input framer; M3 sent its exact case and does not
+4,501-byte raw prewrapped input also stalls. The shared client framer already
+uses an incremental terminator search; the bottleneck is not yet localized.
+M3 sent its exact case to M2 and does not
 patch shared CLI source concurrently. Cancel/disconnect/backpressure remain open.
