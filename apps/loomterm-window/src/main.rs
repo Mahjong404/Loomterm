@@ -220,13 +220,17 @@ mod tests {
         assert_eq!(args[1], "C:/config O'Neil.lua");
         assert!(args.contains(&std::ffi::OsStr::new("--always-new-process")));
         assert_eq!(args[args.len() - 3], o.cli.as_os_str());
-        assert!(c.get_envs().any(|(key, value)|
-            key == "HERDR_WINDOWS_CONPTY" && value.is_none()));
+        assert!(c
+            .get_envs()
+            .any(|(key, value)| key == "HERDR_WINDOWS_CONPTY" && value.is_none()));
     }
 
     #[test]
     fn window_rejects_missing_image_runtime_before_host_launch() {
-        let dir = env::temp_dir().join(format!("loomterm-image-runtime-test-{}", std::process::id()));
+        let dir = env::temp_dir().join(format!(
+            "loomterm-image-runtime-test-{}",
+            std::process::id()
+        ));
         fs::create_dir(&dir).unwrap();
         let cli = dir.join("loomterm.exe");
         fs::write(&cli, b"controlled test bytes").unwrap();

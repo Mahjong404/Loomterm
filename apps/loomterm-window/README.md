@@ -5,8 +5,10 @@ terminal TUI in a dedicated native Windows host and connects to the same
 Loomterm Daemon as Loomterm CLI. It adds no Workspace or work-terminal owner.
 
 This branch depends on M2 commit `56b0ae5f7b0c2e6a1c9fcc30dc313bbcabc0022b`.
-The M2 branch has since advanced to `3e29975e0e5e8549d04ed340314a5f624b408716`;
-this Window branch has not been rebased or rebuilt on that commit.
+The M2 branch has since advanced to `0e975b9167bd8bc49cf0cffb4b4cb6ce31405379`;
+this Window branch has not been rebased on that commit. A separate M2-owned
+CLI candidate was tested inside the staged Window, but that does not update the
+branch dependency or certify a build from the latest M2 HEAD.
 M2's formal quality gate is also Pending. Publication is for source review, not
 an installer, release, or claim that native GUI acceptance is complete.
 
@@ -108,8 +110,10 @@ python -m unittest discover -s tools/fixtures -p 'test_window_*.py' -v
 
 Run these from the pinned Rust 1.96.1 workspace and set
 `WINDOW_CONPTY_PACKAGE` to the verified fixed package before the Python suite
-to exercise its real staging case. The local 1.96.1 installation used for M3
-lacked rustfmt and Clippy components; their pinned checks remain unverified.
+to exercise its real staging case. A direct fixed-1.96.1 rustfmt check,
+rustc metadata check, clippy-driver check and four direct crate tests pass with
+cached dependencies. The current offline Cargo resolver cannot find `sha2`, so
+these direct checks do not certify a fresh `cargo check` or `cargo clippy` run.
 
 The native fixture uses Python 3.12+ and Pillow for optional bitmap captures.
 Build a bounded query child and run the exact-PID Windows fixture:
@@ -141,10 +145,10 @@ its output does not establish candidate-window or font correctness.
 | Native system close, no-client XTVERSION continuation, same Daemon/Shell/Terminal reattach | Passed |
 | Actual bitmap capture | Available through Win32 PrintWindow; not a blanket visual Pass |
 | Repeated-resize visual stability | Five native sizes retain the long prompt in inner/outer text; inspected candidate screenshots show no obvious residual. Prior residual is retained; wider visual/cursor acceptance remains Pending |
-| Native keyboard and raw-console compatibility | Foreground click, ASCII and Alt+x reached the work process; Shift/Ctrl/F6/CJK/Emoji raw-reader assertions failed. The host disables default key bindings except Clipboard shortcuts, so these failures cannot be attributed to host shortcut interception. The M2 candidate preserves WM_CHAR Emoji in a real PowerShell string; direct Daemon input still becomes four replacement characters in inner ConPTY raw ReadFile even at UTF-8 CP 65001 and input mode 0x280. These failures remain open |
-| IME, OS Clipboard and mouse titlebar close | Maintainer reports preedit/candidates, Esc cancel, Chinese commit, Shift-drag selection, Ctrl+Shift+C/V copy/paste, and titlebar X normal in the fixed local candidate. Same Shell reattach after X is verified. A small bracketed-paste protocol case passes; large/cancel/disconnect and independent native scrolling remain open |
+| Native keyboard and raw-console compatibility | With M2 candidate 463df14d in a real Window, ASCII and Alt+x reached the raw work process; CJK passed in one run but not another, while Shift+x, Ctrl+K, F6 and supplementary Emoji did not pass that raw-reader matrix. The maintainer saw and focused one test window; a later trace window was not seen, so exact host/TUI key-loss attribution is Pending. The host disables default key bindings except Clipboard shortcuts. A separate PowerShell string path preserves WM_CHAR Emoji; inner ConPTY raw ReadFile still produces four replacement characters at input CP 65001/mode 0x280. These scopes are distinct |
+| IME, OS Clipboard and mouse titlebar close | Maintainer reports preedit/candidates, Esc cancel, Chinese commit, Shift-drag selection, Ctrl+Shift+C/V copy/paste, and titlebar X normal in the fixed local candidate. Same Shell reattach after X is verified. Real-Window bracketed paste passes exact markers/digest through 2,261 bytes but becomes slow with size; 4,501 bytes did not reach the raw work process within 15 seconds. Cancel/disconnect and independent native scrolling remain open |
 | CJK/emoji/combining/wide-cell rendering | CJK, combining text, Emoji and ZWJ are visible; engine cell-width probes pass. Maintainer confirms CJK/Emoji glyphs in the manual case. Multi-font/DPI and full cursor/layout acceptance remain incomplete |
-| Kitty PNG across both terminal layers | Fixed Microsoft ConPTY 1.24.260710001 preserves the exact APC. The 32x32 checker displays, resizes, scrolls out, redraws, replaces at the same ID/position and repeats; truncated replacement and a decoded image above 64 MiB do not draw. Two Windows each render it; closing one leaves the other and its Shell intact. Visible error feedback and resource reclamation remain Pending |
+| Kitty PNG across both terminal layers | Fixed Microsoft ConPTY 1.24.260710001 preserves the exact APC. The 32x32 checker displays, resizes, scrolls out, redraws, replaces at the same ID/position and repeats; truncated replacement and a decoded image above 64 MiB do not draw. Two Windows each render it; closing one leaves the other and its Shell intact. Five further display/delete cycles kept host handles at 1,040–1,043 after initial allocation and backend handles at 188 in one run; these process-level samples do not count image/GPU resources or prove reclamation. Visible error feedback and exact resource reclamation remain Pending |
 
 The current system ConPTY drops PNG APC even with passthrough; the fixed
 package in [conpty.json](conpty.json) preserves it through the CLI's existing
@@ -162,15 +166,11 @@ No common CLI/Daemon/native-PTY source is changed by this Window branch.
 The standalone PTY probe answers startup CPR only; separate live Window tests
 establish actual image rendering. One image does not prove all lifecycle cases.
 
-The local input integration also tested an M2-owned CLI candidate with SHA-256
-40069dd7513bac85a6eacbd9d2d409fbd97140f63c968c5f9e8d5ad4cb90c7c7,
-derived from the stated M2 base plus its input-state fix. That fix separates
-serialized UTF-16 state from ASCII wrapper input. It has not changed this
-branch's dependency ref or public build base. The fixed-base build retains its
-known supplementary-input defect. The M2 owner has now published a subsequent
-input fix on its branch, but the exact local candidate binary was never published
-and this Window branch has not been rebuilt or GUI-regressed against that commit.
-Do not claim the updated dependency is already integrated here.
+The newer local M2-owned CLI candidate tested in the Window has SHA-256
+`463df14d6c4ab776ee05c8bea029c3908aa9aa312e9b34d89e7a900b0032238c`.
+Earlier results used candidate `40069dd7`. The fixed-base build still retains
+its known supplementary-input defect. The candidate binary is not published as
+part of this branch, and this PR has not integrated the newer M2 branch source.
 
 The host GUI socket retains the upstream Windows AF_UNIX path-length limit.
 A long controlled Root produced a scoped warning while TUI operation continued;
@@ -182,8 +182,14 @@ message probe found a shared scroll offset: scrolling one Window also moved the
 other. The shared CLI/Daemon PaneScroll owner must repair this; it is not a
 Window host setting. A small bracketed paste reached a raw work process with
 the exact start/end markers and Chinese/control-text payload; newline was
-normalized to CRLF by inner ConPTY. Large, cancelled and disconnected pastes
-remain Pending.
+normalized to CRLF by inner ConPTY. A bounded raw-reader fixture now checks
+larger paste length and FNV-1a digest through the complete Window path: 301,
+1,141 and 2,261 bytes passed, taking 0.39, 2.25 and 8.39 seconds respectively.
+A 4,501-byte paste returned success from the host control command but the
+reader received zero bytes before its 15-second watchdog; a raw prewrapped
+write behaved likewise. This suggests superlinear buffering or framing, but
+the exact boundary remains under M2-owned CLI diagnosis. Cancelled/disconnected
+pastes remain Pending.
 
 ## Short manual completion check
 

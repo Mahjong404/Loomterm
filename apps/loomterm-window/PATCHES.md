@@ -37,16 +37,19 @@ test and real outer-PTY byte capture pass. BMP/combining WM_CHAR reaches the
 work process. With M2's separately owned input-state fix, supplementary input
 also reaches an actual PowerShell string as exact UTF-8. The original fixed
 M2 binary still drops it. The M2 owner has since published its input fix in a
-later M2 branch commit, but this Window branch remains on its fixed older base
-and its exact local candidate binary is not a published dependency. No automatic
-PR rebase or GUI recheck is implied. A raw ReadFile console-mode test still yields
+later M2 branch commit, but this Window branch remains on its fixed older base.
+M3 has staged and GUI-tested a newer M2-owned CLI candidate (SHA-256 463df14d...),
+not a published Window branch dependency. No automatic PR rebase is implied.
+A raw ReadFile console-mode test still yields
 replacement characters with verified input CP 65001 and mode 0x280; native
 SendInput chord tests also have failures.
 This is a partial repair, not complete native Unicode input acceptance.
-Window-crate tests now run offline against the cached fixed dependency: four
-tests pass on Rust 1.96.1. The extracted exact UTF-16 decoder test and host
-input-types crate test also pass. Fixed 1.96.1 fmt/Clippy components are not
-present; an incidental 1.99 rustup invocation is not a fixed-toolchain pass.
+Window-crate tests previously passed 4/4 with Cargo on fixed Rust 1.96.1.
+Current fixed 1.96.1 rustfmt, rustc metadata check, direct clippy-driver
+with -D warnings and 4/4 direct rustc tests pass against cached dependencies.
+The local offline Cargo resolver currently reports no matching sha2 package,
+so this source-only direct check is not a fresh cargo check/Clippy pass.
+The extracted exact UTF-16 decoder and host input-types tests also passed.
 
 ## App-local ConPTY staging
 
@@ -68,6 +71,19 @@ replacement rejection and a decoded image over 64 MiB have now passed real
 Window bitmap checks. The launcher refuses a missing adjacent bundle and clears
 the inherited system-ConPTY override; the existing CLI loader still owns exact
 hash validation. Visible error feedback and bounded resource reclamation remain
-Pending assertions. Retain the original
+Pending assertions. A finite five-cycle real-Window display/delete run sampled
+host/backend private bytes and handle counts. After initial host allocation,
+one run held 1,040–1,043 host handles and 188 backend handles across the cycles;
+the three-second idle sample remained at 1,040/188. This is bounded process-level
+evidence, not an image-placement or GPU texture count and not proof that deletion
+reclaims all graphics resources. Retain the original
 [license](../../third-party/licenses/microsoft-conpty/LICENSE.txt) and
 [NOTICE](../../third-party/licenses/microsoft-conpty/NOTICE.md).
+
+No fourth host patch was added for large paste. An M3-owned 256 KiB-capped raw
+work-process fixture records paste delimiters, bytes and FNV-1a. In a real Window
+using candidate 463df14d, 301/1,141/2,261-byte pastes pass in 0.39/2.25/8.39
+seconds; 4,501 bytes produce no complete event within 15 seconds. The same
+4,501-byte raw prewrapped input also stalls. The suspected growing-buffer scan
+belongs to M2's shared client input framer; M3 sent its exact case and does not
+patch shared CLI source concurrently. Cancel/disconnect/backpressure remain open.
