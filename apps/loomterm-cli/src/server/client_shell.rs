@@ -325,6 +325,7 @@ pub(super) fn render_pane_surface(
                 )
                 .and_then(|runtime| runtime.scroll_metrics())
             {
+                let metrics = metrics.for_client_rows(pane.inner_rect.height as usize);
                 let view_metrics = pane_scroll_views.get_mut(&pane.id).map_or(
                     crate::pane::ScrollMetrics {
                         offset_from_bottom: 0,

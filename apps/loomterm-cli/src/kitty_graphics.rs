@@ -344,6 +344,7 @@ fn collect_visible_placements(
             );
         let pane_placements = runtime.kitty_image_placements_at_scroll_offset_with_data_filter(
             scrollback_offset,
+            info.inner_rect.height,
             |descriptor| {
                 if descriptor.source_file {
                     return false;

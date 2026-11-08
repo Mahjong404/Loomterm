@@ -27,18 +27,134 @@ fn scrollback_test_server(
     std::sync::mpsc::Receiver<Vec<u8>>,
     crate::layout::PaneId,
 ) {
+    scrollback_test_server_sized(24, initial_screen)
+}
+
+fn scrollback_test_server_sized(
+    rows: u16,
+    initial_screen: &[u8],
+) -> (
+    HeadlessServer,
+    std::sync::mpsc::Receiver<Vec<u8>>,
+    std::sync::mpsc::Receiver<Vec<u8>>,
+    crate::layout::PaneId,
+) {
     let (mut server, control_rx, render_rx, pane_id) = retained_test_server_with_control(b"");
     server.app.state.workspaces[0].insert_test_runtime(
         pane_id,
         crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
             80,
-            24,
+            rows,
             100_000,
             initial_screen,
         ),
     );
     server.app.state.ensure_test_terminals();
     (server, control_rx, render_rx, pane_id)
+}
+
+#[tokio::test]
+async fn shorter_client_live_tail_is_not_clipped_by_larger_terminal_viewport() {
+    let (mut server, _control_rx, _render_rx, pane_id) =
+        scrollback_test_server_sized(35, &scrolling_lines(0..90));
+    let mut views = std::collections::HashMap::new();
+    let target = Some(crate::ui::TabSurfaceTarget {
+        workspace_index: 0,
+        tab_index: 0,
+    });
+    let area = Rect::new(0, 0, 80, 24);
+    let graphics = crate::kitty_graphics::surface::DeliveryCache::default();
+    let render = |server: &mut HeadlessServer, views: &mut std::collections::HashMap<_, _>| {
+        crate::server::client_shell::render_pane_surface(
+            &mut server.app,
+            target,
+            area,
+            false,
+            false,
+            crate::kitty_graphics::HostCellSize::default(),
+            &graphics,
+            1,
+            views,
+        )
+        .expect("shorter client surface")
+    };
+
+    let live = render(&mut server, &mut views);
+    let scroll = live.panes[0].scroll.as_ref().expect("scroll metrics");
+    assert_eq!(
+        scroll.viewport_rows,
+        u64::from(live.panes[0].inner_rect.height)
+    );
+    assert!(
+        frame_text(&live.frame).contains("module_89"),
+        "live tail clipped"
+    );
+
+    let raw_metrics = server
+        .app
+        .state
+        .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+        .unwrap()
+        .scroll_metrics()
+        .unwrap();
+    let mut client = crate::server::clients::ClientConnection::new(
+        (80, 24),
+        crate::kitty_graphics::HostCellSize::default(),
+        1,
+        crate::protocol::RenderEncoding::SemanticFrame,
+        None,
+    );
+    let client_metrics = raw_metrics.for_client_rows(live.panes[0].inner_rect.height as usize);
+    assert_eq!(
+        client_metrics.max_offset_from_bottom,
+        raw_metrics.max_offset_from_bottom + 35 - 24
+    );
+    client.set_pane_scroll_view(pane_id, 20, client_metrics);
+    views = client.pane_scroll_views;
+    assert!(!frame_text(&render(&mut server, &mut views).frame).contains("module_89"));
+    views.clear();
+    let returned = render(&mut server, &mut views);
+    assert!(frame_text(&returned.frame).contains("module_89"));
+    assert_eq!(
+        returned.panes[0]
+            .scroll
+            .as_ref()
+            .unwrap()
+            .offset_from_bottom,
+        0
+    );
+
+    let public_pane_id = server.app.public_pane_id(0, pane_id).unwrap();
+    let visible_rows = server.shell_client_pane_viewport_rows(1, pane_id).unwrap();
+    assert_eq!(visible_rows, 24);
+    server.clients.get_mut(&1).unwrap().set_pane_scroll_view(
+        pane_id,
+        40,
+        raw_metrics.for_client_rows(visible_rows),
+    );
+    let wheel = crate::protocol::ClientPaneInputEvent::Mouse {
+        kind: crate::protocol::ClientMouseKind::ScrollDown,
+        position: crate::protocol::ClientMousePosition::Cell {
+            column: 30,
+            row: 12,
+        },
+        geometry: None,
+        modifiers: 0,
+        lines: 3,
+    };
+    for _ in 0..30 {
+        server.handle_server_event_with_render_impact(ServerEvent::ClientShellPaneInput {
+            client_id: 1,
+            pane_id: public_pane_id.clone(),
+            events: vec![wheel.clone()],
+        });
+    }
+    assert!(server.clients[&1].pane_scroll_views.is_empty());
+    let mut after_views =
+        std::mem::take(&mut server.clients.get_mut(&1).unwrap().pane_scroll_views);
+    let live_after_wheel = render(&mut server, &mut after_views);
+    assert!(frame_text(&live_after_wheel.frame).contains("module_89"));
+    shutdown_test_runtimes(&mut server);
 }
 
 #[tokio::test]
@@ -288,6 +404,49 @@ async fn image_placements_follow_each_clients_text_viewport() {
         0,
         "graphics projection must restore the shared engine viewport"
     );
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn shorter_client_image_placement_uses_the_same_cropped_rows_as_text() {
+    let mut output = scrolling_lines(0..25);
+    output.extend_from_slice(b"\x1b_Ga=T,f=32,t=d,i=8,p=4,s=1,v=1,c=1,r=1,q=2;/wAA/w==\x1b\\");
+    output.extend_from_slice(&scrolling_lines(25..40));
+    let (mut server, _control_rx, _render_rx, pane_id) = scrollback_test_server_sized(35, &output);
+    let runtime = server
+        .app
+        .state
+        .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+        .unwrap();
+    let full = runtime.kitty_image_placements_at_scroll_offset_with_data_filter(0, 35, |_| true);
+    let short = runtime.kitty_image_placements_at_scroll_offset_with_data_filter(0, 24, |_| true);
+    assert_eq!(full.len(), 1);
+    assert_eq!(short.len(), 1);
+    assert_eq!(
+        short[0].render.viewport_row,
+        full[0].render.viewport_row - 11
+    );
+    assert_eq!(runtime.scroll_metrics().unwrap().offset_from_bottom, 0);
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn shorter_client_hyperlinks_use_cropped_viewport_coordinates() {
+    let mut output = scrolling_lines(0..25);
+    output.extend_from_slice(b"\x1b]8;;https://example.invalid\x1b\\LINK\x1b]8;;\x1b\\\r\n");
+    output.extend_from_slice(&scrolling_lines(25..40));
+    let (mut server, _control_rx, _render_rx, pane_id) = scrollback_test_server_sized(35, &output);
+    let runtime = server
+        .app
+        .state
+        .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+        .unwrap();
+    let full = runtime.visible_hyperlinks_at_scroll_offset(Rect::new(0, 0, 80, 35), 0);
+    let short = runtime.visible_hyperlinks_at_scroll_offset(Rect::new(0, 0, 80, 24), 0);
+    assert!(!full.is_empty(), "link fixture should be visible");
+    assert_eq!(short.len(), full.len());
+    assert_eq!((short[0].0).1, (full[0].0).1 - 11);
+    assert_eq!(runtime.scroll_metrics().unwrap().offset_from_bottom, 0);
     shutdown_test_runtimes(&mut server);
 }
 

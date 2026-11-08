@@ -518,6 +518,30 @@ impl HeadlessServer {
         }
     }
 
+    /// Use this attachment's pane height for reading offsets, even when a
+    /// different client's larger window currently determines the PTY size.
+    pub(super) fn shell_client_pane_viewport_rows(
+        &self,
+        client_id: u64,
+        pane_id: crate::layout::PaneId,
+    ) -> Option<usize> {
+        let client = self.clients.get(&client_id)?;
+        let target = self.shell_target_for_client(client_id)?;
+        let area = Rect::new(0, 0, client.terminal_size.0, client.terminal_size.1);
+        crate::ui::compute_tab_surface_for(
+            &self.app.state,
+            &self.app.terminal_runtimes,
+            Some(target),
+            area,
+            false,
+            client.cell_size,
+        )
+        .pane_infos
+        .into_iter()
+        .find(|info| info.id == pane_id)
+        .map(|info| usize::from(info.inner_rect.height))
+    }
+
     fn finish_shell_tab_geometry_change(&mut self, start_pending_agent_resumes: bool) {
         for client in self.clients.values_mut() {
             client.request_recompute();

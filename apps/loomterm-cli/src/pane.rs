@@ -3617,7 +3617,7 @@ impl PaneRuntime {
         }
         let cursor = self
             .terminal
-            .cursor_state_at_scroll_offset(offset_from_bottom)?;
+            .cursor_state_at_scroll_offset(offset_from_bottom, area.height)?;
         if cursor.x >= area.width || cursor.y >= area.height {
             return None;
         }
@@ -3793,6 +3793,7 @@ impl PaneRuntime {
     pub(crate) fn kitty_image_placements_at_scroll_offset_with_data_filter<F>(
         &self,
         offset_from_bottom: usize,
+        visible_rows: u16,
         needs_data: F,
     ) -> Vec<crate::ghostty::KittyImagePlacement>
     where
@@ -3801,6 +3802,7 @@ impl PaneRuntime {
         self.terminal
             .kitty_image_placements_at_scroll_offset_with_data_filter(
                 offset_from_bottom,
+                visible_rows,
                 needs_data,
             )
     }

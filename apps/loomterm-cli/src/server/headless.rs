@@ -2508,6 +2508,8 @@ impl HeadlessServer {
                     interaction && self.promote_client_to_foreground(client_id);
                 let geometry_changed =
                     interaction && self.claim_shell_tab_geometry(client_id, false);
+                let client_viewport_rows =
+                    self.shell_client_pane_viewport_rows(client_id, runtime_pane_id);
                 let Some(runtime) = self.app.state.runtime_for_pane_in_workspace(
                     &self.app.terminal_runtimes,
                     workspace_index,
@@ -2525,6 +2527,9 @@ impl HeadlessServer {
                         if let (Some(metrics), Some(client)) =
                             (runtime.scroll_metrics(), self.clients.get_mut(&client_id))
                         {
+                            let metrics = metrics.for_client_rows(
+                                client_viewport_rows.unwrap_or(metrics.viewport_rows),
+                            );
                             let before = client
                                 .reconcile_pane_scroll_view(runtime_pane_id, metrics)
                                 .offset_from_bottom;

@@ -183,6 +183,10 @@ impl HeadlessServer {
             );
             return false;
         }
+        let metrics = metrics.for_client_rows(
+            self.shell_client_pane_viewport_rows(client_id, pane_id)
+                .unwrap_or(metrics.viewport_rows),
+        );
         let requested = usize::try_from(params.offset_from_bottom).unwrap_or(usize::MAX);
         let Some(client) = self.clients.get_mut(&client_id) else {
             return false;

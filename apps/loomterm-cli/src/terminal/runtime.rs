@@ -499,6 +499,7 @@ impl TerminalRuntime {
     pub(crate) fn kitty_image_placements_at_scroll_offset_with_data_filter<F>(
         &self,
         offset_from_bottom: usize,
+        visible_rows: u16,
         needs_data: F,
     ) -> Vec<crate::ghostty::KittyImagePlacement>
     where
@@ -507,6 +508,7 @@ impl TerminalRuntime {
         self.0
             .kitty_image_placements_at_scroll_offset_with_data_filter(
                 offset_from_bottom,
+                visible_rows,
                 needs_data,
             )
     }
