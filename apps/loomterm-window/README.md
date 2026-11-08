@@ -9,7 +9,9 @@ The M2 branch has since advanced to `0e975b9167bd8bc49cf0cffb4b4cb6ce31405379`;
 this Window branch has not been rebased on that commit. A separate M2-owned
 CLI candidate was tested inside the staged Window, but that does not update the
 branch dependency or certify a build from the latest M2 HEAD.
-M2's formal quality gate is also Pending. Publication is for source review, not
+The early Linux/macOS M2 native gate passed on 2026-11-08. This Window branch
+still depends on its older fixed M2 commit, so it does not inherit that later
+source or prove a rebuild against it. Publication is for source review, not
 an installer, release, or claim that native GUI acceptance is complete.
 
 ## Fixed inputs and prerequisites
