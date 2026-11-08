@@ -1,0 +1,28 @@
+[package]
+name = "loomterm-reader-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.96.1"
+license = "MIT"
+publish = false
+description = "Bounded read-only local Markdown content for Loomterm Window"
+
+# Independent build/API boundary; neither terminal workspace is changed by M4-A.
+[workspace]
+
+[dependencies]
+pulldown-cmark = { version = "=0.13.6", default-features = false }
+unicode-segmentation = "=1.13.3"
+unicode-width = "=0.2.2"
+unicode-linebreak = "=0.1.5"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[[bench]]
+name = "bounded"
+harness = false
+
+[[bench]]
+name = "view"
+harness = false
