@@ -661,6 +661,38 @@ async fn retained_pane_patches_fall_back_when_a_client_reads_history() {
 }
 
 #[tokio::test]
+async fn retained_pane_patches_fall_back_for_a_shorter_live_client() {
+    let (mut server, _control_rx, render_rx, pane_id) =
+        scrollback_test_server_sized(35, &scrolling_lines(0..90));
+    let (writer, _large_control_rx, _large_render_rx) = test_client_writer();
+    server.clients.insert(
+        2,
+        ClientConnection::new(
+            (80, 35),
+            crate::kitty_graphics::HostCellSize::default(),
+            2,
+            RenderEncoding::SemanticFrame,
+            Some(writer),
+        ),
+    );
+    assert!(server.claim_shell_tab_geometry(2, false));
+    server.render_and_stream();
+    let _ = render_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    let surface = server.clients[&1].render_state.last_pane_surface().unwrap();
+    assert_eq!(surface.panes[0].inner_rect.height, 24);
+    assert!(frame_text(&surface.frame).contains("module_89"));
+    write_shared_test_pane(&mut server, pane_id, b"SHORT_CLIENT_FOLLOW\r\n");
+    assert!(
+        !server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])),
+        "engine-coordinate dirty rows must not overwrite a cropped client tail"
+    );
+    server.render_and_stream();
+    let surface = server.clients[&1].render_state.last_pane_surface().unwrap();
+    assert!(frame_text(&surface.frame).contains("SHORT_CLIENT_FOLLOW"));
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
 async fn surface_scroll_sends_scrolling_output_as_a_shift_and_new_rows() {
     let (mut server, _control_rx, render_rx, pane_id) =
         retained_test_server_with_control(&scrolling_lines(0..40));
