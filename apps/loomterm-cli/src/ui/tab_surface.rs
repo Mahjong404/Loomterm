@@ -1,8 +1,11 @@
+use std::collections::HashMap;
+
 use ratatui::{layout::Rect, Frame};
 
 use super::panes::{compute_pane_infos_for_tab, render_panes, resize_tab_panes};
 use crate::app::AppState;
-use crate::layout::{PaneInfo, SplitBorder};
+use crate::layout::{PaneId, PaneInfo, SplitBorder};
+use crate::pane::ScrollMetrics;
 use crate::protocol::CursorState;
 use crate::terminal::TerminalRuntimeRegistry;
 
@@ -23,6 +26,7 @@ pub(crate) struct TabSurfaceView<'a> {
     pub(crate) target: Option<TabSurfaceTarget>,
     pub(crate) pane_infos: &'a [PaneInfo],
     pub(crate) split_borders: &'a [SplitBorder],
+    pub(crate) scroll_metrics: Option<&'a HashMap<PaneId, ScrollMetrics>>,
 }
 
 pub(crate) fn compute_tab_surface(
@@ -129,6 +133,7 @@ pub(crate) fn render_tab_surface(
         surface.target,
         surface.pane_infos,
         surface.split_borders,
+        surface.scroll_metrics,
     );
 }
 
@@ -148,7 +153,17 @@ pub(crate) fn tab_surface_hyperlinks(
     for info in surface.pane_infos {
         if let Some(runtime) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id)
         {
-            links.extend(runtime.visible_hyperlinks(info.inner_rect));
+            let pane_links = surface
+                .scroll_metrics
+                .and_then(|metrics| metrics.get(&info.id))
+                .map(|metrics| {
+                    runtime.visible_hyperlinks_at_scroll_offset(
+                        info.inner_rect,
+                        metrics.offset_from_bottom,
+                    )
+                })
+                .unwrap_or_else(|| runtime.visible_hyperlinks(info.inner_rect));
+            links.extend(pane_links);
         }
     }
     links
@@ -168,7 +183,13 @@ pub(crate) fn tab_surface_cursor(
     if runtime.synchronized_output_active() {
         return None;
     }
-    let scrolled_back = super::panes::pane_is_scrolled_back(runtime);
+    let view_metrics = surface
+        .scroll_metrics
+        .and_then(|metrics| metrics.get(&info.id).copied());
+    let scrolled_back = view_metrics.map_or_else(
+        || super::panes::pane_is_scrolled_back(runtime),
+        |metrics| metrics.offset_from_bottom > 0,
+    );
     let reveal = app.reveal_hidden_cursor_for_cjk_ime
         && (!app.cjk_ime_agent_filter_configured || {
             let detected = app
@@ -180,7 +201,13 @@ pub(crate) fn tab_surface_cursor(
             detected.is_some_and(|agent| app.cjk_ime_agents.contains(&agent))
         });
 
-    if let Some(cursor) = runtime.cursor_state(info.inner_rect, true) {
+    let cursor = view_metrics.map_or_else(
+        || runtime.cursor_state(info.inner_rect, true),
+        |metrics| {
+            runtime.cursor_state_at_scroll_offset(info.inner_rect, true, metrics.offset_from_bottom)
+        },
+    );
+    if let Some(cursor) = cursor {
         let visible = if reveal {
             !scrolled_back
         } else {
@@ -259,6 +286,7 @@ mod tests {
             target: surface.target,
             pane_infos: &surface.pane_infos,
             split_borders: &surface.split_borders,
+            scroll_metrics: None,
         };
         let mut terminal =
             Terminal::new(TestBackend::new(full_area.width, full_area.height)).unwrap();

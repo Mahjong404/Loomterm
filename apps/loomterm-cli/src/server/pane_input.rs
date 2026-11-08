@@ -360,6 +360,72 @@ pub(super) fn apply_client_terminal_input_events(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct ClientLocalScrollContext {
+    wheel_routing: Option<crate::pane::WheelRouting>,
+    plain_page_keys: Option<bool>,
+    page_rows: u16,
+}
+
+impl ClientLocalScrollContext {
+    pub(super) fn from_runtime(runtime: &crate::terminal::TerminalRuntime) -> Self {
+        Self {
+            wheel_routing: runtime.wheel_routing(),
+            plain_page_keys: runtime.plain_page_keys_use_host_scrollback(),
+            page_rows: runtime.current_size().0.max(1),
+        }
+    }
+}
+
+pub(super) fn client_local_scroll_delta(
+    context: ClientLocalScrollContext,
+    event: &ClientPaneInputEvent,
+    host_page_keys: bool,
+) -> Option<isize> {
+    match event {
+        ClientPaneInputEvent::Mouse {
+            kind: crate::protocol::ClientMouseKind::ScrollUp,
+            lines,
+            ..
+        } if matches!(
+            context.wheel_routing,
+            None | Some(crate::pane::WheelRouting::HostScroll)
+        ) =>
+        {
+            Some(isize::try_from((*lines).max(1)).unwrap_or(isize::MAX))
+        }
+        ClientPaneInputEvent::Mouse {
+            kind: crate::protocol::ClientMouseKind::ScrollDown,
+            lines,
+            ..
+        } if matches!(
+            context.wheel_routing,
+            None | Some(crate::pane::WheelRouting::HostScroll)
+        ) =>
+        {
+            Some(-isize::try_from((*lines).max(1)).unwrap_or(isize::MAX))
+        }
+        ClientPaneInputEvent::Key {
+            code,
+            modifiers,
+            kind,
+            ..
+        } if host_page_keys
+            && *modifiers == 0
+            && *kind != crate::protocol::ClientKeyKind::Release
+            && context.plain_page_keys == Some(true) =>
+        {
+            let lines = isize::try_from(context.page_rows).unwrap_or(isize::MAX);
+            match code {
+                crate::protocol::ClientKeyCode::PageUp => Some(lines),
+                crate::protocol::ClientKeyCode::PageDown => Some(-lines),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

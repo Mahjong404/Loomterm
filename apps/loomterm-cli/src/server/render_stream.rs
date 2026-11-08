@@ -544,16 +544,30 @@ pub(crate) type RenderedTabSurface = (
 );
 
 /// Renders only the active tab's pane surface at an origin-relative client viewport.
+#[cfg(test)]
 pub(crate) fn render_tab_surface_virtual(
     app_state: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
     layout: crate::ui::TabSurfaceLayout,
     area: Rect,
 ) -> RenderedTabSurface {
+    render_tab_surface_virtual_with_scroll_metrics(app_state, terminal_runtimes, layout, area, None)
+}
+
+pub(crate) fn render_tab_surface_virtual_with_scroll_metrics(
+    app_state: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    layout: crate::ui::TabSurfaceLayout,
+    area: Rect,
+    scroll_metrics: Option<
+        &std::collections::HashMap<crate::layout::PaneId, crate::pane::ScrollMetrics>,
+    >,
+) -> RenderedTabSurface {
     let surface = crate::ui::TabSurfaceView {
         target: layout.target,
         pane_infos: &layout.pane_infos,
         split_borders: &layout.split_borders,
+        scroll_metrics,
     };
     let cursor = crate::ui::tab_surface_cursor(app_state, terminal_runtimes, surface);
     let hyperlinks = crate::ui::tab_surface_hyperlinks(app_state, terminal_runtimes, surface);

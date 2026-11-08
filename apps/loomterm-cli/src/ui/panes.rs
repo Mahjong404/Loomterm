@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use ratatui::{
     buffer::Buffer,
     layout::{Direction, Rect},
@@ -488,6 +490,7 @@ pub(super) fn render_panes(
     target: Option<super::tab_surface::TabSurfaceTarget>,
     pane_infos: &[PaneInfo],
     split_borders: &[crate::layout::SplitBorder],
+    scroll_views: Option<&HashMap<PaneId, crate::pane::ScrollMetrics>>,
 ) {
     let Some(target) = target else {
         return;
@@ -499,11 +502,19 @@ pub(super) fn render_panes(
 
     for info in pane_infos {
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id) {
+            let view_metrics = scroll_views
+                .map(|views| views.get(&info.id).copied())
+                .unwrap_or_else(|| rt.scroll_metrics());
+            let offset_from_bottom = view_metrics.map_or(0, |metrics| metrics.offset_from_bottom);
             let show_cursor = info.is_focused
-                && !pane_is_scrolled_back(rt)
+                && offset_from_bottom == 0
                 && app.pane_exposes_host_cursor(ws_idx, info.id);
-            rt.render(frame, info.inner_rect, show_cursor);
-            render_pane_scrollbar(app, frame, info, rt);
+            if scroll_views.is_some() {
+                rt.render_at_scroll_offset(frame, info.inner_rect, show_cursor, offset_from_bottom);
+            } else {
+                rt.render(frame, info.inner_rect, show_cursor);
+            }
+            render_pane_scrollbar(app, frame, info, view_metrics);
         } else if let Some(reason) = ws
             .tabs
             .get(target.tab_index)

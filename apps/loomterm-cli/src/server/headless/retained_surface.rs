@@ -283,6 +283,10 @@ impl HeadlessServer {
             if client.render_state.requires_recompute() {
                 fallback!("recompute_pending");
             }
+            if !client.pane_scroll_views.is_empty() {
+                // Dirty rows use the engine viewport; readers need a full projection.
+                fallback!("client_scrolled_back");
+            }
             let Some(surface) = client.render_state.last_pane_surface() else {
                 fallback!("no_baseline");
             };

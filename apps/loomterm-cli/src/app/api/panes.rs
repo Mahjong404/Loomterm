@@ -32,6 +32,18 @@ use super::super::api_helpers::{METADATA_SOURCE_MAX_CHARS, METADATA_TTL_MAX_MS};
 use super::responses::{encode_error, encode_success};
 
 impl App {
+    pub(crate) fn client_pane_scroll_info(
+        &self,
+        pane_target: &str,
+    ) -> Option<(PaneId, PaneInfo, crate::pane::ScrollMetrics)> {
+        let (ws_idx, pane_id) = self.parse_pane_id(pane_target)?;
+        let runtime =
+            self.state
+                .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)?;
+        let metrics = runtime.scroll_metrics()?;
+        Some((pane_id, self.pane_info(ws_idx, pane_id)?, metrics))
+    }
+
     pub(super) fn handle_pane_split(&mut self, id: String, params: PaneSplitParams) -> String {
         let target = if let Some(target_pane_id) = params.target_pane_id.as_deref() {
             self.parse_pane_id(target_pane_id)

@@ -578,6 +578,11 @@ impl HeadlessServer {
                 .get(&client_id)
                 .map(|client| client.shell_graphics_delivery.clone())
                 .unwrap_or_default();
+            let mut pane_scroll_views = self
+                .clients
+                .get(&client_id)
+                .map(|client| client.pane_scroll_views.clone())
+                .unwrap_or_default();
             let shell_render = if matches!(mode, ClientConnectionMode::ClientShell)
                 && self
                     .clients
@@ -599,7 +604,11 @@ impl HeadlessServer {
                     render_cell_size,
                     &shell_graphics_delivery,
                     client_id,
+                    &mut pane_scroll_views,
                 );
+                if let Some(client) = self.clients.get_mut(&client_id) {
+                    client.pane_scroll_views = pane_scroll_views;
+                }
                 crate::render_prof::duration_since(
                     "full_render.render_tab_surface_virtual",
                     render_started,
