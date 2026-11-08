@@ -44,11 +44,11 @@ A raw ReadFile console-mode test still yields
 replacement characters with verified input CP 65001 and mode 0x280; native
 SendInput chord tests also have failures.
 This is a partial repair, not complete native Unicode input acceptance.
-Window-crate tests previously passed 4/4 with Cargo on fixed Rust 1.96.1.
-Current fixed 1.96.1 rustfmt, rustc metadata check, direct clippy-driver
-with -D warnings and 4/4 direct rustc tests pass against cached dependencies.
-The local offline Cargo resolver currently reports no matching sha2 package,
-so this source-only direct check is not a fresh cargo check/Clippy pass.
+Window-crate metadata, fmt, all-target check, four Cargo tests and strict
+all-target Clippy pass on fixed Rust 1.96.1 MSVC using the existing offline
+dependency/toolchain cache and an isolated Window target directory.
+This supersedes the earlier default-cache sha2 resolution failure and
+direct-only quality scope. The Window Python suite passes 9/9.
 The extracted exact UTF-16 decoder and host input-types tests also passed.
 
 ## App-local ConPTY staging
@@ -88,3 +88,27 @@ seconds; 4,501 bytes produce no complete event within 15 seconds. The same
 uses an incremental terminator search; the bottleneck is not yet localized.
 M3 sent its exact case to M2 and does not
 patch shared CLI source concurrently. Cancel/disconnect/backpressure remain open.
+
+## Shared-client viewport dependency verification
+
+The host patches above are unchanged. A separately staged CLI built from
+M5 commit 232dd043eeeba78cac9e630f16c010d0b4318e4f has SHA-256
+e93e5516d230c3ea4cdbbd4b2d88a87ef47cd4ffbe6bf1fcf107858c5eb95d50.
+It repairs client-local reading offsets and the smaller Window's live-tail
+projection when another client leads a taller inner PTY. The intermediate
+candidate passed return-to-tail but lost subsequent output in the cropped
+client. A retained-row geometry guard fixes that native red/green case.
+M3 verified Resize, return-tail and subsequent output, mixed a real CLI with
+a Window, and tested finite 16 KiB history eviction; all passed with the same
+working Shell. Two-client image drawing, close-one retention and Delete
+also passed. Exact-HWND synthetic wheel events are not physical-wheel or
+full cursor/selection acceptance. This Window branch has not merged or
+rebased onto that M5 source; keep both PRs Draft.
+
+On the preceding candidate e3759e37, serialized Win32 record replay reaches the raw work
+process for Shift/Ctrl/Alt/F6 and Chinese, and posted F6 WM_KEYDOWN succeeds.
+The foreground native-key test was skipped when focus was unavailable;
+the prior native-key failures remain unresolved. Non-BMP raw-reader
+replacement characters and the 4,501-byte paste failure persist, while
+a 301-byte paste control passes. These results add no host patch and do
+not claim the shared input boundary or M3 Gate is complete.

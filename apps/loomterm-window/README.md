@@ -112,10 +112,12 @@ python -m unittest discover -s tools/fixtures -p 'test_window_*.py' -v
 
 Run these from the pinned Rust 1.96.1 workspace and set
 `WINDOW_CONPTY_PACKAGE` to the verified fixed package before the Python suite
-to exercise its real staging case. A direct fixed-1.96.1 rustfmt check,
-rustc metadata check, clippy-driver check and four direct crate tests pass with
-cached dependencies. The current offline Cargo resolver cannot find `sha2`, so
-these direct checks do not certify a fresh `cargo check` or `cargo clippy` run.
+to exercise its real staging case. With the existing fixed offline cache and
+an isolated Window target directory, Cargo metadata, fmt, all-target check,
+four crate tests and all-target Clippy with `-D warnings` pass on Rust 1.96.1
+MSVC. The Python suite passes 9/9, including the real fixed-package case.
+The earlier default-cache `sha2` resolution failure is retained as an
+environment result; it is no longer the current Window Cargo check result.
 
 The native fixture uses Python 3.12+ and Pillow for optional bitmap captures.
 Build a bounded query child and run the exact-PID Windows fixture:
@@ -145,10 +147,11 @@ its output does not establish candidate-window or font correctness.
 | Full TUI, Shell I/O, Tab/Pane, CLI/Window and two-Window focus coexistence | Live-host tests passed |
 | Native HWND/DPI, four physical window sizes including responsive layout, outer grid/TUI/inner PTY propagation | Passed on Windows at DPI 144 |
 | Native system close, no-client XTVERSION continuation, same Daemon/Shell/Terminal reattach | Passed |
+| Client reading isolation with the M5 dependency candidate | Native two-Window Resize/return-tail and subsequent live output, actual CLI/Window mixed reading and 16 KiB history eviction pass on the exact candidate below. Synthetic wheel events target the owned HWND; physical wheel/selection remain Pending. This Window branch has not integrated M5 source |
 | Actual bitmap capture | Available through Win32 PrintWindow; not a blanket visual Pass |
 | Repeated-resize visual stability | Five native sizes retain the long prompt in inner/outer text; inspected candidate screenshots show no obvious residual. Prior residual is retained; wider visual/cursor acceptance remains Pending |
 | Native keyboard and raw-console compatibility | With M2 candidate 463df14d in a real Window, ASCII and Alt+x reached the raw work process; CJK passed in one run but not another, while Shift+x, Ctrl+K, F6 and supplementary Emoji did not pass that raw-reader matrix. The maintainer saw and focused one test window; a later trace window was not seen, so exact host/TUI key-loss attribution is Pending. The host disables default key bindings except Clipboard shortcuts. A separate PowerShell string path preserves WM_CHAR Emoji; inner ConPTY raw ReadFile still produces four replacement characters at input CP 65001/mode 0x280. These scopes are distinct |
-| IME, OS Clipboard and mouse titlebar close | Maintainer reports preedit/candidates, Esc cancel, Chinese commit, Shift-drag selection, Ctrl+Shift+C/V copy/paste, and titlebar X normal in the fixed local candidate. Same Shell reattach after X is verified. Real-Window bracketed paste passes exact markers/digest through 2,261 bytes but becomes slow with size; 4,501 bytes did not reach the raw work process within 15 seconds. Cancel/disconnect and independent native scrolling remain open |
+| IME, OS Clipboard and mouse titlebar close | Maintainer reports preedit/candidates, Esc cancel, Chinese commit, Shift-drag selection, Ctrl+Shift+C/V copy/paste, and titlebar X normal in the fixed local candidate. Same Shell reattach after X is verified. Real-Window bracketed paste passes exact markers/digest through 2,261 bytes but becomes slow with size; 4,501 bytes did not reach the raw work process within 15 seconds. Cancel/disconnect and physical mouse-wheel/selection remain open |
 | CJK/emoji/combining/wide-cell rendering | CJK, combining text, Emoji and ZWJ are visible; engine cell-width probes pass. Maintainer confirms CJK/Emoji glyphs in the manual case. Multi-font/DPI and full cursor/layout acceptance remain incomplete |
 | Kitty PNG across both terminal layers | Fixed Microsoft ConPTY 1.24.260710001 preserves the exact APC. The 32x32 checker displays, resizes, scrolls out, redraws, replaces at the same ID/position and repeats; truncated replacement and a decoded image above 64 MiB do not draw. Two Windows each render it; closing one leaves the other and its Shell intact. Five further display/delete cycles kept host handles at 1,040–1,043 after initial allocation and backend handles at 188 in one run; these process-level samples do not count image/GPU resources or prove reclamation. Visible error feedback and exact resource reclamation remain Pending |
 
@@ -168,21 +171,38 @@ No common CLI/Daemon/native-PTY source is changed by this Window branch.
 The standalone PTY probe answers startup CPR only; separate live Window tests
 establish actual image rendering. One image does not prove all lifecycle cases.
 
-The newer local M2-owned CLI candidate tested in the Window has SHA-256
+Earlier input results used M2-owned candidates `40069dd7` and
 `463df14d6c4ab776ee05c8bea029c3908aa9aa312e9b34d89e7a900b0032238c`.
-Earlier results used candidate `40069dd7`. The fixed-base build still retains
-its known supplementary-input defect. The candidate binary is not published as
-part of this branch, and this PR has not integrated the newer M2 branch source.
+The latest shared-client candidate tested in the Window has SHA-256
+`e93e5516d230c3ea4cdbbd4b2d88a87ef47cd4ffbe6bf1fcf107858c5eb95d50`
+and source commit `232dd043eeeba78cac9e630f16c010d0b4318e4f` in
+[M5 Draft PR #3](https://github.com/Mahjong404/Loomterm/pull/3).
+It passes native two-Window Resize/return-to-tail and subsequent new output,
+mixed CLI/Window reading and finite 16 KiB history eviction. Each test retains one Daemon and
+the same working Shell. Two Windows each render the image; closing A leaves
+B's image and Shell intact, and Delete clears B's image. Wheel events target
+the owned HWND and Pane; these results do not certify physical mouse behavior
+or every cursor/selection layout. The candidate binary is not published here,
+and this Window branch has not merged or rebased onto the M2/M5 source.
+
+With the preceding M5 candidate e3759e37, replaying serialized Win32 records through the
+outer PTY reaches the raw work process for ASCII, Shift, Ctrl, Alt, F6 and
+Chinese. Posting F6 WM_KEYDOWN and text WM_CHAR messages to the owned HWND
+also reaches it. These controls bypass foreground keyboard injection and
+do not establish actual modifier or IME behavior. Supplementary Emoji still
+becomes replacement characters at the raw-reader boundary; the previously
+accepted PowerShell string and manual IME/glyph scopes remain distinct.
 
 The host GUI socket retains the upstream Windows AF_UNIX path-length limit.
 A long controlled Root produced a scoped warning while TUI operation continued;
 use a short test Root for host-control measurements. No personal runtime fallback.
 Native fonts/DPI combinations, visible malformed/oversized image errors,
 bounded render-resource accounting, sustained slow-client recovery, performance
-and release redistribution remain separate gates. A two-Window native wheel
-message probe found a shared scroll offset: scrolling one Window also moved the
-other. The shared CLI/Daemon PaneScroll owner must repair this; it is not a
-Window host setting. A small bracketed paste reached a raw work process with
+and release redistribution remain separate gates. The earlier shared scroll
+failure and smaller-client tail clipping after Resize are fixed within the
+tested M5 candidate scope above. The shared CLI/Daemon retains scrollback
+ownership while ClientShell reading positions are private; no Window host
+patch or second Terminal Owner was added. A small bracketed paste reached a raw work process with
 the exact start/end markers and Chinese/control-text payload; newline was
 normalized to CRLF by inner ConPTY. A bounded raw-reader fixture now checks
 larger paste length and FNV-1a digest through the complete Window path: 301,
@@ -192,6 +212,9 @@ reader received zero bytes before its 15-second watchdog; a raw prewrapped
 write behaved likewise. Latency rises sharply across these sizes, but the
 exact bottleneck and layer remain under M2-owned CLI diagnosis. Cancelled/disconnected
 pastes remain Pending.
+The preceding M5 candidate e3759e37 repeats the 4,501-byte failure (zero raw-reader bytes
+before the watchdog), while a 301-byte control passes exact delimiters and
+digest in 0.375 seconds. The scroll repair does not resolve this input defect.
 
 ## Short manual completion check
 
