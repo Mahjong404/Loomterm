@@ -397,8 +397,9 @@ per-process fixture files. Its numbers are codec/I/O timings, not Window frame
 timings or resident-memory measurements.
 
 Windows 11 x64/MSVC validation on 2026-11-09 passed fixed Rust 1.96.1 metadata,
-fmt, check, strict Clippy, 32 unit/integration tests and two compiled API examples.
-Mock Host coverage includes semantic/grapheme layout, 10,000 paragraphs, long
+fmt, check, strict Clippy, 33 unit/integration tests and two compiled API examples.
+Mock Host coverage includes a visible image ticket through local decode and
+resource-size reflow, semantic/grapheme layout, 10,000 paragraphs, long
 code, wide tables, resource reflow, refresh anchors, search/headings/links,
 selection, rapid scroll/resize, cancel/stale jobs, private-state isolation,
 budget/error paths and resource release. Linux/macOS runtime behavior, Unix
