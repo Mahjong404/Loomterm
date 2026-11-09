@@ -67,3 +67,7 @@ features (including CJK width support); linebreak has no selected optional
 features. Unicode version changes can alter layout and must receive grapheme,
 CJK, emoji and source-mapping regression checks. Retained copyright files cover
 generated Unicode tables. No upstream implementation files were vendored.
+
+M4 semantic paint data adds no third-party package. Formula raster candidates
+are discussed in the [Reader ADR](ADR.md); none is linked, bundled or distributed
+by this crate yet, so its lockfile and retained license set are unchanged.

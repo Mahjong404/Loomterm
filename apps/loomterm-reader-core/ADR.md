@@ -118,3 +118,24 @@ the synchronous decoder. This decision adds no network request, directory grant,
 active markup, window, GPU or terminal owner. M3's separate Window branch has
 a scoped native image-paint fixture Pass on fixed Reader source; broader image
 acceptance and formula rendering remain M3-host work.
+
+## M4 semantic paint handoff and math choice
+
+Reader View now resolves `Frame::paint_style` from existing block/inline roles,
+focus and selection, and separates heading gap from ordinary block gap. The
+returned role/flags have no Win32 handles, font names, RGB colors or pixel units.
+M3 remains owner of native theme mapping, font metrics, input events and the
+Reader HWND. This additive Reader API is accepted for standalone code/tests;
+real semantic painting remains Proposed until a fixed Reader SHA is consumed
+and native screenshots/interaction are reviewed.
+
+For math, `pulldown-cmark` identifies inline/display regions but does not typeset
+LaTeX. [latex2mathml](https://github.com/osanshouo/latex2mathml) converts common
+commands to MathML under MIT, but the current GDI host has no MathML painter.
+[RaTeX](https://github.com/erweixin/RaTeX) has a pure-Rust PNG raster path that
+could reuse the host image surface; adopting it adds parser/layout/raster crates,
+KaTeX font assets under OFL-1.1 and a new untrusted-expression performance
+boundary. Typst would import a broader document compiler than this Reader needs.
+No math dependency or font is adopted in this change. Formula rendering stays
+Pending until the renderer, fixed dependency/license graph, expression depth and
+output-pixel budgets, and HWND raster verification can be completed together.

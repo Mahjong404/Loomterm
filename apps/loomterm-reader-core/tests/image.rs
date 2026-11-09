@@ -2,7 +2,9 @@ use image::{
     codecs::{jpeg::JpegEncoder, png::PngEncoder, webp::WebPEncoder},
     ExtendedColorType, ImageEncoder,
 };
-use loomterm_reader_core::view::{LogicalSize, ReaderView, ViewApply, ViewLimits, Viewport};
+use loomterm_reader_core::view::{
+    Input, LogicalSize, ReaderView, ResourceKind, ViewApply, ViewLimits, Viewport,
+};
 use loomterm_reader_core::{
     load_local_image, BlockedImage, Cancellation, ImageLimits, ImageLoadError, ImageReference,
     Limits, NodeKind, ReaderError,
@@ -147,6 +149,103 @@ fn visible_frame_ticket_drives_local_decode_and_resource_reflow() {
         .any(|item| item.ticket.node == ticket.node));
     view.close();
     drop(decoded);
+}
+
+#[test]
+fn multiple_images_are_requested_only_when_visible_and_refresh_rejects_old_tickets() {
+    let fixture = Fixture::new();
+    for name in ["one.png", "two.png", "three.png"] {
+        fixture.image(name, &png());
+    }
+    let source = fixture.0.join("doc.md");
+    let middle = "middle paragraph\n\n".repeat(30);
+    fs::write(
+        &source,
+        format!("![one](one.png)\n\n![two](two.png)\n\n{middle}![three](three.png)\n"),
+    )
+    .unwrap();
+    let token = Cancellation::default();
+    let mut view = ReaderView::new(
+        Limits::default(),
+        ViewLimits::default(),
+        Viewport::new(40, 8).unwrap(),
+    )
+    .unwrap();
+    let load = view.open(&source).unwrap().execute();
+    assert_eq!(view.apply(load), ViewApply::Ready);
+    let first = view.frame(&token).unwrap();
+    let first_tickets: Vec<_> = first
+        .resources
+        .iter()
+        .filter(|r| r.kind == ResourceKind::Image)
+        .map(|r| r.ticket.clone())
+        .collect();
+    assert_eq!(first_tickets.len(), 2);
+    for ticket in &first_tickets {
+        let reference = match &first.projection.document.content.nodes[ticket.node].kind {
+            NodeKind::Image { reference, .. } => reference,
+            other => panic!("unexpected resource node: {other:?}"),
+        };
+        let pixels = load_local_image(reference, ImageLimits::default(), &token).unwrap();
+        assert_eq!(pixels.rgba.len(), 8);
+        assert!(view
+            .resource_size(
+                ticket,
+                LogicalSize {
+                    columns: 2,
+                    rows: 1
+                }
+            )
+            .unwrap());
+    }
+    view.input(Input::End, &token).unwrap();
+    let end = view.frame(&token).unwrap();
+    assert_eq!(
+        end.resources
+            .iter()
+            .filter(|r| r.kind == ResourceKind::Image)
+            .count(),
+        1
+    );
+    let old = end
+        .resources
+        .iter()
+        .find(|r| r.kind == ResourceKind::Image)
+        .unwrap()
+        .ticket
+        .clone();
+    fs::write(&source, "![replacement](one.png)\n").unwrap();
+    let reload = view.refresh().unwrap().unwrap();
+    assert_eq!(view.apply(reload.execute()), ViewApply::Ready);
+    assert!(!view
+        .resource_size(
+            &old,
+            LogicalSize {
+                columns: 2,
+                rows: 1
+            }
+        )
+        .unwrap());
+    assert!(!view
+        .resource_size(
+            &first_tickets[0],
+            LogicalSize {
+                columns: 2,
+                rows: 1
+            }
+        )
+        .unwrap());
+    let replacement = view.frame(&token).unwrap();
+    assert_eq!(
+        replacement
+            .resources
+            .iter()
+            .filter(|r| r.kind == ResourceKind::Image)
+            .count(),
+        1
+    );
+    view.close();
+    assert!(view.projection().is_none());
 }
 
 #[test]
