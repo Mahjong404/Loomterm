@@ -2,11 +2,12 @@
 
 M4-A supplies bounded local Markdown content; M4-B adds logical document layout,
 a private viewport, navigation and a tested Mock Host adapter. The separate M3
-Window branch consumes a fixed revision for an experimental native plain-text
-Reader surface; this library itself owns no native window. It produces draw data
-and bounded local PNG/JPEG/WebP RGBA8 decode results without a GPU, terminal
-renderer or working Terminal Owner. Semantic styling, image/math painting and
-the full M4 visual/lifecycle gates remain Pending.
+Window Draft PR #1 pins a fixed Reader revision for a native text/image surface;
+this library itself owns no native window. It produces draw data and bounded
+local PNG/JPEG/WebP RGBA8 decode results without a GPU, terminal renderer or
+working Terminal Owner. Native image painting has a scoped Windows HWND fixture
+Pass; semantic styling, formula painting and the full M4 visual/lifecycle gates
+remain Pending.
 
 The crate directory is the Reader physical development/build boundary. Its own
 manifest, lockfile, source, tests and output do not change either concurrent
@@ -163,8 +164,10 @@ per-decode ceilings; decoder `max_alloc` is a best-effort setting, **not** a har
 peak-RSS or CPU quota. Cancellation is checked during file reading and before/
 after codec work, not inside a codec. The host must additionally cap aggregate
 decoded buffers and worker concurrency. Local file changes require re-requesting
-that image resource. Real image placement/painting has not yet been accepted in
-the native Window.
+that image resource. M3's separate Window branch pins Reader
+`6c63ee07d14d89dd0bda0af24139706aea8cb350` and has a scoped native
+PNG color/alpha/refresh/error/budget/close fixture; Window ownership and the
+remaining visual/lifecycle acceptance stay with M3.
 
 ## Display a document
 
@@ -404,5 +407,5 @@ code, wide tables, resource reflow, refresh anchors, search/headings/links,
 selection, rapid scroll/resize, cancel/stale jobs, private-state isolation,
 budget/error paths and resource release. Linux/macOS runtime behavior, Unix
 symlink tests, hostile filesystem races, semantic visual styling, formula readability,
-native image display and full window lifecycle/reading interactions remain
-unverified. These checks do not close M3, M4 UI or M6 performance gates.
+broader native image behavior and full window lifecycle/reading interactions
+remain unverified. These checks do not close M3, M4 UI or M6 performance gates.
