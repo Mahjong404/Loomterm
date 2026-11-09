@@ -100,3 +100,20 @@ scroll/resize, reflow, navigation, refresh/stale results and release; finite vie
 benchmarks measure actual elapsed work. Cache allocations are separately labelled.
 Native window and real image/math/interaction acceptance remains an M4-C gate;
 passing this isolated workspace does not close full M4.
+
+## M4-C local image decode boundary
+
+Keep the host-owned image-paint lifecycle separate from Reader-owned source
+validation and decode. Add fixed `image 0.25.10` with only PNG/JPEG/WebP features
+and retained transitive licenses. `load_local_image` uses the same regular-file,
+local-path and reparse checks as Markdown source reads, then content-sniffs a
+bounded file and returns owned RGBA8 pixels. Preflight dimensions and output
+pixel count before codec conversion; set the codec's strict dimension limits
+and best-effort allocation limit. A blocked, missing or corrupt image must not
+invalidate the document. The host associates pixels with revision-bound resource
+tickets, limits aggregate decoded memory/workers and releases assets on close.
+
+Codec memory/CPU usage is not a hard process quota; cancellation cannot preempt
+the synchronous decoder. This decision adds no network request, directory grant,
+active markup, window, GPU or terminal owner. Real image painting and formula
+rendering remain M3-host coordination and native acceptance work.

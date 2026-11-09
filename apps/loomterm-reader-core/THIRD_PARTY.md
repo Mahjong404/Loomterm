@@ -4,7 +4,8 @@ Original Loomterm code remains under the repository's MIT [license](../../LICENS
 This independent library fixes `pulldown-cmark 0.13.6` with default features off.
 [Cargo.lock](Cargo.lock) records exact registry versions and checksums; there is
 no copied parser implementation, native dependency, UI or network client.
-M4-B fixes three Unicode dependencies for its logical view implementation.
+M4-B fixes three Unicode dependencies for its logical view implementation;
+M4-C fixes `image 0.25.10` with default features off and PNG/JPEG/WebP only.
 
 | Dependency | Locked version | Purpose | License and retained original texts |
 | --- | --- | --- | --- |
@@ -16,11 +17,40 @@ M4-B fixes three Unicode dependencies for its logical view implementation.
 | unicode-width | 0.2.2 | Logical CJK/emoji display widths | MIT OR Apache-2.0; [MIT](licenses/unicode-width-0.2.2/LICENSE-MIT), [Apache](licenses/unicode-width-0.2.2/LICENSE-APACHE), [copyright](licenses/unicode-width-0.2.2/COPYRIGHT) |
 | unicode-linebreak | 0.1.5 | Unicode line-break opportunities | Apache-2.0; [license](licenses/unicode-linebreak-0.1.5/LICENSE) |
 
+The image feature graph adds these 19 fixed registry packages. Every original
+license variant found in the published package root is retained in its named
+`licenses/` directory; the links below identify the package's license folder
+through one of those original texts.
+
+| Dependency | Locked version | Purpose | License and retained original text |
+| --- | --- | --- | --- |
+| image | 0.25.10 | Image format dispatch/RGBA8 | MIT OR Apache-2.0; [MIT](licenses/image-0.25.10/LICENSE-MIT) |
+| png | 0.18.1 | PNG codec | MIT OR Apache-2.0; [MIT](licenses/png-0.18.1/LICENSE-MIT) |
+| zune-jpeg | 0.5.15 | JPEG codec | MIT OR Apache-2.0 OR Zlib; [MIT](licenses/zune-jpeg-0.5.15/LICENSE-MIT) |
+| zune-core | 0.5.3 | JPEG support | MIT OR Apache-2.0 OR Zlib; [MIT](licenses/zune-core-0.5.3/LICENSE-MIT) |
+| image-webp | 0.2.4 | WebP codec | MIT OR Apache-2.0; [MIT](licenses/image-webp-0.2.4/LICENSE-MIT) |
+| adler2 | 2.0.1 | Deflate checksum | 0BSD OR MIT OR Apache-2.0; [MIT](licenses/adler2-2.0.1/LICENSE-MIT) |
+| autocfg | 1.5.1 | Build-time compatibility probe | Apache-2.0 OR MIT; [MIT](licenses/autocfg-1.5.1/LICENSE-MIT) |
+| bytemuck | 1.25.2 | Pixel byte conversion | Zlib OR Apache-2.0 OR MIT; [MIT](licenses/bytemuck-1.25.2/LICENSE-MIT) |
+| byteorder-lite | 0.1.0 | Byte order | Unlicense OR MIT; [MIT](licenses/byteorder-lite-0.1.0/LICENSE-MIT) |
+| cfg-if | 1.0.4 | Conditional compilation | MIT OR Apache-2.0; [MIT](licenses/cfg-if-1.0.4/LICENSE-MIT) |
+| crc32fast | 1.5.0 | PNG checksum | MIT OR Apache-2.0; [MIT](licenses/crc32fast-1.5.0/LICENSE-MIT) |
+| fdeflate | 0.3.7 | PNG deflate | MIT OR Apache-2.0; [MIT](licenses/fdeflate-0.3.7/LICENSE-MIT) |
+| flate2 | 1.1.9 | Deflate | MIT OR Apache-2.0; [MIT](licenses/flate2-1.1.9/LICENSE-MIT) |
+| miniz_oxide | 0.8.9 | Deflate implementation | MIT OR Zlib OR Apache-2.0; [MIT](licenses/miniz_oxide-0.8.9/LICENSE-MIT.md) |
+| moxcms | 0.8.1 | Color management | BSD-3-Clause OR Apache-2.0; [BSD](licenses/moxcms-0.8.1/LICENSE.md) |
+| num-traits | 0.2.19 | Numeric codec support | MIT OR Apache-2.0; [MIT](licenses/num-traits-0.2.19/LICENSE-MIT) |
+| pxfm | 0.1.30 | Pixel color transforms | BSD-3-Clause OR Apache-2.0; [BSD](licenses/pxfm-0.1.30/LICENSE.md) |
+| quick-error | 2.0.1 | Codec error definitions | MIT/Apache-2.0; [MIT](licenses/quick-error-2.0.1/LICENSE-MIT) |
+| simd-adler32 | 0.3.10 | Adler checksum | MIT; [license](licenses/simd-adler32-0.3.10/LICENSE.md) |
+
 The parser's published Rust minimum is 1.71.1, below this module's 1.96.1 pin.
-The selected feature graph has these seven platform-neutral Rust dependencies
-only, with no OS-target features or native compiler requirement. A fixed release
-plus lockfile avoids silent parser updates. Windows/MSVC builds and tests were
-run; Linux/macOS execution is not claimed. Preserve the above original texts
+The parser/view base graph has seven platform-neutral registry dependencies;
+image decoding adds 19, for 26 in the selected lockfile. The image crate
+publishes a Rust minimum of 1.88, below the Reader 1.96.1 pin. No native codec,
+OS-target feature or network client is selected. A fixed release plus lockfile
+avoids silent updates. Windows/MSVC builds and tests were run; Linux/macOS
+execution is not claimed. Preserve the above original texts
 with redistributed artifacts; no installer or release is produced here.
 
 Upstream primary references: [parser API](https://docs.rs/pulldown-cmark/0.13.6/pulldown_cmark/)
