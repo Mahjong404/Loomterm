@@ -165,8 +165,8 @@ per-decode ceilings; decoder `max_alloc` is a best-effort setting, **not** a har
 peak-RSS or CPU quota. Cancellation is checked during file reading and before/
 after codec work, not inside a codec. The host must additionally cap aggregate
 decoded buffers and worker concurrency. Local file changes require re-requesting
-that image resource. M3's separate Window branch pins Reader
-`6c63ee07d14d89dd0bda0af24139706aea8cb350` and has a scoped native
+that image resource. M3's Window-owned adapter in Draft PR #1 pins Reader
+`7e11dcca3c59deb87545c75ec4f387f95e09004e` and has a scoped native
 PNG color/alpha/refresh/error/budget/close fixture; Window ownership and the
 remaining visual/lifecycle acceptance stay with M3.
 
