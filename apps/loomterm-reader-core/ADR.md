@@ -128,8 +128,9 @@ M3 remains owner of native theme mapping, font metrics, input events and the
 Reader HWND. This additive Reader API is accepted for standalone code/tests;
 real semantic painting remains Proposed for production integration. M3 consumed
 fixed Reader `7e11dcca…` in an isolated Windows build and produced a scoped
-native screenshot/Resize/Tab-focus/close fixture Pass; the M3 host patch is not
-yet in its Draft PR, and broader input/lifecycle acceptance remains Pending.
+native screenshot/Resize/Tab-focus/close fixture Pass. M3 committed its
+Window-owned adapter to Draft PR #1 (`e2935904…`); broader input/lifecycle
+acceptance remains Pending.
 
 For math, `pulldown-cmark` identifies inline/display regions but does not typeset
 LaTeX. [latex2mathml](https://github.com/osanshouo/latex2mathml) converts common
