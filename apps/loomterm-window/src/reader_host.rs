@@ -4,14 +4,15 @@
 //! surface, input bridge, fonts and pixel/resource renderer are separate work.
 use loomterm_reader_core::{
     view::{
-        Action, Frame, Input, LogicalSize, Metrics, ResourceFailure, ResourceStatus,
-        ResourceTicket, ViewApply, ViewError, ViewLimits, ViewLoadRequest, ViewLoadResult,
-        Viewport,
+        Action, Frame, Input, LogicalSize, Metrics, Projection, ResourceFailure, ResourceStatus,
+        ResourceTicket, SearchHit, ViewApply, ViewError, ViewLimits, ViewLoadRequest,
+        ViewLoadResult, Viewport,
     },
     Cancellation, Limits, ReaderState,
 };
 use std::{
     path::Path,
+    sync::Arc,
     thread::{self, JoinHandle},
 };
 
@@ -242,6 +243,21 @@ impl ReaderHost {
         self.view.as_ref()?.selection()
     }
 
+    /// A read-only, revision-bound projection lease for bounded search work.
+    pub fn search_projection(&self) -> Option<Arc<Projection>> {
+        self.view.as_ref()?.projection().cloned()
+    }
+
+    /// Search hits from an old/other Reader are rejected by Reader Core.
+    pub fn locate_search(&mut self, hit: &SearchHit) -> Result<(), ReaderHostError> {
+        self.frame = None;
+        self.view
+            .as_mut()
+            .ok_or(ViewError::NoDocument)?
+            .locate_search(hit, &Cancellation::default())?;
+        Ok(())
+    }
+
     pub fn error(&self) -> Option<&ViewError> {
         self.view.as_ref()?.error()
     }
@@ -451,5 +467,30 @@ mod tests {
         }
         assert!(pending > 0, "fixture did not exercise pending projection");
         assert!(visible_text(&mut host).contains("Paragraph 0000"));
+    }
+
+    #[test]
+    fn search_hit_is_bound_to_one_reader_revision() {
+        let files = Files::new();
+        let first = files.write("first.md", "alpha bravo alpha");
+        let second = files.write("second.md", "beta");
+        let mut host = ReaderHost::new(Viewport::new(40, 10).unwrap()).unwrap();
+        host.open(&first).unwrap();
+        wait_loaded(&mut host);
+        let projection = host.search_projection().unwrap();
+        let hits = projection
+            .search("alpha", 8, &Cancellation::default())
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        host.locate_search(&hits[0]).unwrap();
+        assert!(visible_text(&mut host).contains("alpha"));
+
+        host.open(&second).unwrap();
+        wait_loaded(&mut host);
+        assert!(matches!(
+            host.locate_search(&hits[0]),
+            Err(ReaderHostError::View(ViewError::InvalidPosition))
+        ));
+        assert!(visible_text(&mut host).contains("beta"));
     }
 }

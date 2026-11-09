@@ -5,7 +5,7 @@ use loomterm_reader_core::{
     load_local_image,
     view::{
         BlockRole, Input, LogicalSize, PaintStyle, ResourceFailure, ResourceKind, ResourceStatus,
-        ResourceTicket, SurfaceRole, Viewport,
+        ResourceTicket, SearchHit, SurfaceRole, ViewError, Viewport,
     },
     Cancellation, DecodedImage, ImageLimits, ImageLoadError, ImageReference, NodeKind,
 };
@@ -30,6 +30,8 @@ const MARGIN: i32 = 12;
 const CLASS: &str = "LoomtermReaderDocumentV1";
 const IMAGE_CACHE_BYTES: usize = 16 * 1024 * 1024;
 const IMAGE_QUEUE_LEN: usize = 16;
+const SEARCH_MAX_BYTES: usize = 256;
+const SEARCH_MAX_HITS: usize = 128;
 const FONT_VARIANTS: usize = 16;
 const TEXT_COLOR: u32 = 0x00202020;
 const HEADING_COLOR: u32 = 0x00583B24;
@@ -38,6 +40,7 @@ const LINK_COLOR: u32 = 0x00B16508;
 const CODE_BACKGROUND: u32 = 0x00F7F5F4;
 const QUOTE_BACKGROUND: u32 = 0x00F8F8F6;
 const FOCUSED_LINK_BACKGROUND: u32 = 0x00FFEFD8;
+const SEARCH_BACKGROUND: u32 = 0x00BFF5FF;
 const TABLE_HEADER_BACKGROUND: u32 = 0x00F6EFE9;
 const TABLE_BODY_BACKGROUND: u32 = 0x00FCFAF8;
 
@@ -74,6 +77,13 @@ struct ImageJob {
     request: ImageRequest,
     cancel: Cancellation,
     worker: JoinHandle<Result<DecodedImage, ImageLoadError>>,
+}
+
+struct SearchJob {
+    generation: u64,
+    request: u64,
+    cancel: Cancellation,
+    worker: JoinHandle<Result<Vec<SearchHit>, ViewError>>,
 }
 
 struct CachedImage {
@@ -160,6 +170,15 @@ struct State {
     image_cache_bytes: usize,
     image_active: Option<ImageJob>,
     image_pending: VecDeque<ImageRequest>,
+    search_mode: bool,
+    search_utf16: Vec<u16>,
+    search_query: String,
+    search_status: String,
+    search_request: u64,
+    search_hits: Vec<SearchHit>,
+    search_index: usize,
+    search_active: Option<SearchJob>,
+    search_pending: Option<(u64, String)>,
 }
 
 impl State {
@@ -183,6 +202,15 @@ impl State {
             image_cache_bytes: 0,
             image_active: None,
             image_pending: VecDeque::new(),
+            search_mode: false,
+            search_utf16: Vec::new(),
+            search_query: String::new(),
+            search_status: String::new(),
+            search_request: 0,
+            search_hits: Vec::new(),
+            search_index: 0,
+            search_active: None,
+            search_pending: None,
         }))
     }
 
@@ -193,6 +221,176 @@ impl State {
         self.image_pending.clear();
         self.image_cache.clear();
         self.image_cache_bytes = 0;
+    }
+
+    fn cancel_search(&mut self) {
+        self.search_request = self.search_request.wrapping_add(1);
+        if let Some(job) = &self.search_active {
+            job.cancel.cancel();
+        }
+        self.search_pending = None;
+        self.search_hits.clear();
+        self.search_index = 0;
+        self.search_mode = false;
+        self.search_utf16.clear();
+        self.search_query.clear();
+        self.search_status.clear();
+    }
+
+    fn launch_search(&mut self, request: u64, query: String) {
+        let Some(projection) = self.reader.search_projection() else {
+            self.search_status = "Document not ready".to_owned();
+            return;
+        };
+        let cancel = Cancellation::default();
+        let worker_cancel = cancel.clone();
+        let worker =
+            thread::spawn(move || projection.search(&query, SEARCH_MAX_HITS, &worker_cancel));
+        self.search_active = Some(SearchJob {
+            generation: self.reader.generation(),
+            request,
+            cancel,
+            worker,
+        });
+    }
+
+    fn begin_search(&mut self, query: String) {
+        self.cancel_search();
+        self.search_query = query.clone();
+        self.search_status = "Searching".to_owned();
+        let request = self.search_request;
+        if self.search_active.is_some() {
+            // One active search and one replaceable pending query per Reader.
+            self.search_pending = Some((request, query));
+        } else {
+            self.launch_search(request, query);
+        }
+    }
+
+    fn poll_search(&mut self) -> bool {
+        if !self
+            .search_active
+            .as_ref()
+            .is_some_and(|job| job.worker.is_finished())
+        {
+            return false;
+        }
+        let job = self.search_active.take().expect("finished search exists");
+        let result = job.worker.join();
+        if let Some((request, query)) = self.search_pending.take() {
+            self.launch_search(request, query);
+            return true;
+        }
+        if job.request != self.search_request || job.generation != self.reader.generation() {
+            return false;
+        }
+        match result {
+            Ok(Ok(hits)) if hits.is_empty() => self.search_status = "No matches".to_owned(),
+            Ok(Ok(hits)) => {
+                self.search_hits = hits;
+                self.search_index = 0;
+                match self.reader.locate_search(&self.search_hits[0]) {
+                    Ok(()) => self.search_status = format!("Find 1/{}", self.search_hits.len()),
+                    Err(error) => {
+                        self.search_hits.clear();
+                        self.search_status = format!("Stale result: {error}");
+                    }
+                }
+            }
+            Ok(Err(error)) => self.search_status = format!("Search error: {error}"),
+            Err(_) => self.search_status = "Search worker failed".to_owned(),
+        }
+        true
+    }
+
+    fn next_search(&mut self, backwards: bool) {
+        if self.search_hits.is_empty() {
+            return;
+        }
+        self.search_index = if backwards {
+            (self.search_index + self.search_hits.len() - 1) % self.search_hits.len()
+        } else {
+            (self.search_index + 1) % self.search_hits.len()
+        };
+        match self
+            .reader
+            .locate_search(&self.search_hits[self.search_index])
+        {
+            Ok(()) => {
+                self.search_status =
+                    format!("Find {}/{}", self.search_index + 1, self.search_hits.len())
+            }
+            Err(error) => {
+                self.cancel_search();
+                self.search_status = format!("Stale result: {error}");
+            }
+        }
+    }
+
+    unsafe fn search_character(&mut self, hwnd: HWND, character: u16) {
+        if !self.search_mode || character < 0x20 || self.search_utf16.len() >= SEARCH_MAX_BYTES {
+            return;
+        }
+        self.search_utf16.push(character);
+        unsafe { self.update_search_title(hwnd) };
+    }
+
+    unsafe fn search_key(&mut self, hwnd: HWND, key: u16) -> bool {
+        if !self.search_mode {
+            return false;
+        }
+        match key {
+            VK_ESCAPE => self.search_mode = false,
+            VK_BACK => {
+                self.search_utf16.pop();
+                if self
+                    .search_utf16
+                    .last()
+                    .is_some_and(|unit| (0xD800..=0xDBFF).contains(unit))
+                {
+                    self.search_utf16.pop();
+                }
+            }
+            VK_RETURN => {
+                self.search_mode = false;
+                match String::from_utf16(&self.search_utf16) {
+                    Ok(query) if !query.is_empty() && query.len() <= SEARCH_MAX_BYTES => {
+                        self.begin_search(query);
+                    }
+                    Ok(_) => {
+                        self.cancel_search();
+                        self.search_status = "Find query must be 1-256 UTF-8 bytes".to_owned();
+                    }
+                    Err(_) => {
+                        self.cancel_search();
+                        self.search_status = "Incomplete Unicode character".to_owned();
+                    }
+                }
+            }
+            _ => return false,
+        }
+        unsafe { self.update_search_title(hwnd) };
+        true
+    }
+
+    unsafe fn update_search_title(&self, hwnd: HWND) {
+        let title = if self.search_mode {
+            format!(
+                "Loomterm Reader - Find: {}",
+                String::from_utf16_lossy(&self.search_utf16)
+            )
+        } else if self.search_query.is_empty() && self.search_status.is_empty() {
+            "Loomterm Reader".to_owned()
+        } else {
+            format!(
+                "Loomterm Reader - {}: {}",
+                self.search_status, self.search_query
+            )
+        };
+        let text = wide(&title);
+        unsafe {
+            SetWindowTextW(hwnd, text.as_ptr());
+        }
     }
 
     fn enqueue_images(&mut self, requests: Vec<ImageRequest>) {
@@ -400,6 +598,7 @@ impl State {
         let table_header_brush = unsafe { CreateSolidBrush(TABLE_HEADER_BACKGROUND) };
         let table_body_brush = unsafe { CreateSolidBrush(TABLE_BODY_BACKGROUND) };
         let focused_link_brush = unsafe { CreateSolidBrush(FOCUSED_LINK_BACKGROUND) };
+        let search_brush = unsafe { CreateSolidBrush(SEARCH_BACKGROUND) };
         let frame_result = self.reader.frame(&Cancellation::default());
         let mut image_requests = Vec::new();
         if frame_result.is_ok() {
@@ -506,6 +705,14 @@ impl State {
                             unsafe {
                                 FillRect(dc, &cell, GetSysColorBrush(COLOR_HIGHLIGHT));
                             }
+                        } else if self.search_hits.get(self.search_index).is_some_and(|hit| {
+                            hit.source.bytes.start < cluster.source.bytes.end
+                                && cluster.source.bytes.start < hit.source.bytes.end
+                        }) && !search_brush.is_null()
+                        {
+                            unsafe {
+                                FillRect(dc, &cell, search_brush);
+                            }
                         } else if style.focused_link && !focused_link_brush.is_null() {
                             unsafe {
                                 FillRect(dc, &cell, focused_link_brush);
@@ -569,6 +776,7 @@ impl State {
             table_header_brush,
             table_body_brush,
             focused_link_brush,
+            search_brush,
         ] {
             if !brush.is_null() {
                 unsafe {
@@ -593,8 +801,31 @@ impl State {
     }
 
     unsafe fn key(&mut self, hwnd: HWND, key: u16) -> bool {
+        if unsafe { self.search_key(hwnd, key) } {
+            return true;
+        }
         let ctrl = unsafe { GetKeyState(VK_CONTROL as i32) } < 0;
         match (ctrl, key) {
+            (true, 0x46) => {
+                self.search_mode = true;
+                self.search_utf16.clear();
+                unsafe { self.update_search_title(hwnd) };
+                true
+            }
+            (false, VK_F3) => {
+                if self.search_hits.is_empty() {
+                    self.search_mode = true;
+                    self.search_utf16.clear();
+                } else {
+                    let backwards = unsafe { GetKeyState(VK_SHIFT as i32) } < 0;
+                    self.next_search(backwards);
+                }
+                unsafe {
+                    self.update_search_title(hwnd);
+                    InvalidateRect(hwnd, ptr::null(), 1);
+                }
+                true
+            }
             (true, 0x43) => {
                 unsafe {
                     self.copy_selection(hwnd);
@@ -605,6 +836,8 @@ impl State {
                 // A source-identical refresh must also re-read changed image files.
                 // Reopen creates fresh Reader resource tickets and drops old pixels.
                 self.reset_images();
+                self.cancel_search();
+                unsafe { self.update_search_title(hwnd) };
                 if let Err(error) = self
                     .reader
                     .close()
@@ -750,6 +983,7 @@ impl State {
         self.pending_frame = false;
         self.selection_start = None;
         self.reset_images();
+        self.cancel_search();
         let _ = self.reader.close();
         for font in &mut self.fonts {
             if !font.is_null() {
@@ -843,6 +1077,10 @@ unsafe extern "system" fn window_proc(
             } else {
                 unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
             }
+        }
+        WM_CHAR if state.search_mode => {
+            unsafe { state.search_character(hwnd, wparam as u16) };
+            0
         }
         WM_CLOSE => {
             unsafe {
@@ -942,6 +1180,12 @@ impl Surface {
             }
         }
         self.state.poll_image(self.hwnd);
+        if self.state.poll_search() {
+            unsafe {
+                self.state.update_search_title(self.hwnd);
+                InvalidateRect(self.hwnd, ptr::null(), 1);
+            }
+        }
     }
 
     fn close(&mut self) {
@@ -1029,6 +1273,35 @@ mod tests {
         assert!(fits_image_cache(0, IMAGE_CACHE_BYTES));
         assert!(!fits_image_cache(1, IMAGE_CACHE_BYTES));
         assert!(!fits_image_cache(IMAGE_CACHE_BYTES, 1));
+    }
+
+    #[test]
+    fn private_search_worker_is_bounded_and_cleared_on_close() {
+        let path = std::env::temp_dir().join(format!(
+            "loomterm-reader-search-owner-{}.md",
+            std::process::id()
+        ));
+        fs::write(&path, "# alpha\n\nalpha beta alpha").unwrap();
+        let mut state = State::new(&path).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while state.reader.search_projection().is_none() && Instant::now() < deadline {
+            state.reader.poll().unwrap();
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(state.reader.search_projection().is_some());
+        state.begin_search("alpha".to_owned());
+        let search_deadline = Instant::now() + Duration::from_secs(2);
+        while state.search_hits.is_empty() && Instant::now() < search_deadline {
+            state.poll_search();
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(state.search_hits.len(), 3);
+        state.next_search(false);
+        assert_eq!(state.search_index, 1);
+        state.release();
+        assert!(state.search_hits.is_empty());
+        assert!(state.search_pending.is_none());
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

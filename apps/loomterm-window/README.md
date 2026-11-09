@@ -265,8 +265,13 @@ opens it yet. The native GDI surface uses Reader Core's PaintStyle roles for
 heading weight/color, emphasis, strike, code/quote/table backgrounds, selection
 and focused links. Sixteen fixed font variants are recreated on DPI changes and
 released with the HWND; Tab/Shift+Tab traverses Reader links without opening
-external targets. Search UI, formulas, wide-character right-half selection and
-physical-device wheel remain Pending. F5 explicitly reopens the same Markdown so
+external targets. Ctrl+F (or F3 without a previous match) starts a private
+Reader search; Enter locates the first match, F3/Shift+F3 cycles matches, and
+the current source span is highlighted. The query is limited to 256 UTF-8
+bytes and 128 returned hits; one cancellable worker and one replaceable pending
+query are held per Reader HWND. Refresh and close invalidate results. Formula
+resources, wide-character right-half selection and physical-device wheel remain
+Pending. F5 explicitly reopens the same Markdown so
 a changed local image refreshes even when the text did not change; it resets
 Reader's scroll position. The exact fixed Reader commit was fetched once into
 an isolated M3 repository and checked by full SHA; no shared branch moved.
@@ -287,6 +292,11 @@ A style case measured 284 heading-color pixels, 33,601 code-background pixels,
 frames also show emphasis and strike. One foreground-guarded SendInput wheel
 changed Reader pixels, while a separate attempt was blocked by OS foreground
 protection. Hardware wheel and full selection/cursor visuals remain Pending.
+An isolated Reader search test sent bounded posted Win32 messages and found
+one result with 1,981 highlighted pixels in the actual HWND; close changed
+launcher GDI objects 31 to 15 while the same Shell remained. Foreground-guarded
+SendInput was blocked before Ctrl+F delivery, so physical search keystrokes
+remain Pending despite the host event/paint path passing.
 
 ## Short manual completion check
 

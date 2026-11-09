@@ -152,3 +152,13 @@ the prior native-key failures remain unresolved. Non-BMP raw-reader
 replacement characters and the 4,501-byte paste failure persist, while
 a 301-byte paste control passes. These results add no host patch and do
 not claim the shared input boundary or M3 Gate is complete.
+
+## Private Reader search host seam
+
+The Window-owned native Reader HWND uses the pinned Reader Core projection
+search and revision-checked locate API. Ctrl+F/F3, UTF-16 WM_CHAR, a bounded
+worker, source-span highlight and cancellation on refresh/close add no WezTerm
+patch and no second document parser or working Terminal owner. Fixed Rust
+1.96.1 Window tests, check, strict Clippy and build passed. A real HWND test
+located and highlighted one synthetic source match via posted Win32 events;
+foreground SendInput was blocked, so physical search input remains Pending.
