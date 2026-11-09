@@ -1,10 +1,22 @@
-# Review-only draft. Nothing here has been published or executed remotely.
-# Approved deployment target: .github/workflows/cli-native.yml on codex/m2-native.
-# The first approved branch publication starts exactly this two-job matrix.
+# Native source, build inputs and test changes run once per PR update or main push.
+# PR #2 validates codex/m2-native through its pull_request event; branch push is
+# intentionally omitted to avoid duplicate Linux/macOS matrices for one commit.
 name: Loomterm Unix native
 on:
   push:
-    branches: [codex/m2-native]
+    branches: [main]
+    paths:
+      - '.github/workflows/cli-native.yml'
+      - 'apps/loomterm-cli/**'
+      - 'tools/test-unix-native.py'
+      - 'tools/fixtures/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/cli-native.yml'
+      - 'apps/loomterm-cli/**'
+      - 'tools/test-unix-native.py'
+      - 'tools/fixtures/**'
 permissions:
   contents: read
 concurrency:

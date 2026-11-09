@@ -1,0 +1,9 @@
+# Working on Loomterm
+
+Read [README](README.md), [CONTRIBUTING](CONTRIBUTING.md), the application [README](apps/loomterm-cli/README.md), [UPSTREAM.json](apps/loomterm-cli/UPSTREAM.json) and [PATCHES.md](apps/loomterm-cli/PATCHES.md) before changing production source. State the owner, scope and observable completion checks. Do not invent a second working Terminal Owner: the Daemon's TerminalRuntimeRegistry owns PTYs, terminal engines and processes; CLI clients own only their local view state. Disconnecting a client must not terminate live work.
+
+Use the independent apps/loomterm-cli workspace and its Rust 1.96.1/Zig 0.16.0 inputs. Direct Cargo commands must run from that directory; repository-root Cargo commands do not select this production toolchain. Keep Windows APIs at platform boundaries and Linux/macOS native paths viable. Preserve ordinary Shell HOME/PATH and Agent storage. Product path isolation must not read or overwrite other Herdr, terminal-host or Agent data.
+
+Keep the original [root MIT license](LICENSE), adopted [Apache-2.0 license](apps/loomterm-cli/LICENSE), vendor notices and [third-party attribution](THIRD_PARTY.md). For adopted code, record changes in PATCHES.md and do not silently replace the fixed upstream or Ghostty revisions. Do not include local research, credentials, Agent histories, raw session output, caches or binaries in public changes. The ignored docs/local/ directory is for private evidence, not a CI artifact.
+
+Use the validation entry points in CONTRIBUTING and report actual outcomes and limitations. Inspect staged and unstaged files and untracked paths; check links and ignore rules. Prefer one authoritative document per topic and avoid duplicate reports. Do not commit, push, merge, publish, or change another session's files without task-specific authorization.
