@@ -115,5 +115,6 @@ tickets, limits aggregate decoded memory/workers and releases assets on close.
 
 Codec memory/CPU usage is not a hard process quota; cancellation cannot preempt
 the synchronous decoder. This decision adds no network request, directory grant,
-active markup, window, GPU or terminal owner. Real image painting and formula
-rendering remain M3-host coordination and native acceptance work.
+active markup, window, GPU or terminal owner. M3's separate Window branch has
+a scoped native image-paint fixture Pass on fixed Reader source; broader image
+acceptance and formula rendering remain M3-host work.
