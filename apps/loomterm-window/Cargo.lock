@@ -149,7 +149,7 @@ checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 [[package]]
 name = "loomterm-reader-core"
 version = "0.1.0"
-source = "git+https://github.com/Mahjong404/Loomterm.git?rev=6c63ee07d14d89dd0bda0af24139706aea8cb350#6c63ee07d14d89dd0bda0af24139706aea8cb350"
+source = "git+https://github.com/Mahjong404/Loomterm.git?rev=7e11dcca3c59deb87545c75ec4f387f95e09004e#7e11dcca3c59deb87545c75ec4f387f95e09004e"
 dependencies = [
  "image",
  "pulldown-cmark",

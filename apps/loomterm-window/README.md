@@ -241,7 +241,7 @@ step lacks cached `async-broadcast` 0.7.2; M5 owns its independent CLI build.
 ## Reader native window (developer entry)
 
 The Window crate pins Reader Core revision
-[`6c63ee07`](https://github.com/Mahjong404/Loomterm/tree/6c63ee07d14d89dd0bda0af24139706aea8cb350/apps/loomterm-reader-core)
+[`7e11dcca`](https://github.com/Mahjong404/Loomterm/tree/7e11dcca3c59deb87545c75ec4f387f95e09004e/apps/loomterm-reader-core)
 from M4. `ReaderHost` owns one logical preview slot per Window client, bounds
 loading to one active worker plus one replaceable pending request, rejects stale
 generations, forwards viewport/input changes and resource-size/failure callbacks,
@@ -261,8 +261,12 @@ visible requests per HWND, the Core's 4-million-pixel per-image limit and a
 16 MiB aggregate decoded-image cache. The GDI surface composites RGBA onto
 white, paints top-down BGRX and releases the cache on Reader close/reopen.
 There is one Reader HWND per launcher and one ReaderHost slot. No TUI command
-opens it yet. Semantic styles, formulas, wide-character right-half selection
-and physical wheel remain Pending. F5 explicitly reopens the same Markdown so
+opens it yet. The native GDI surface uses Reader Core's PaintStyle roles for
+heading weight/color, emphasis, strike, code/quote/table backgrounds, selection
+and focused links. Sixteen fixed font variants are recreated on DPI changes and
+released with the HWND; Tab/Shift+Tab traverses Reader links without opening
+external targets. Search UI, formulas, wide-character right-half selection and
+physical-device wheel remain Pending. F5 explicitly reopens the same Markdown so
 a changed local image refreshes even when the text did not change; it resets
 Reader's scroll position. The exact fixed Reader commit was fetched once into
 an isolated M3 repository and checked by full SHA; no shared branch moved.
@@ -276,9 +280,13 @@ and verifies terminal, Shell and Daemon survival. A missing-source case paints
 the Core error. A native image case counted 684 red, 684 blue and 866 blended
 gray pixels; same-document F5 replacement showed 684 green and zero old red.
 Truncated and over-limit PNGs removed the old colors and showed error/limit
-placeholders. Reader close changed launcher GDI objects from 48 to 47 while
-the terminal remained alive. Foreground protection blocked physical wheel
-injection, so that device path and full selection/cursor visuals remain Pending.
+placeholders. On the fixed 7e11 Core, a fresh image case changed launcher GDI
+objects from 30 to 14 on Reader close while the terminal and Shell remained.
+A style case measured 284 heading-color pixels, 33,601 code-background pixels,
+15,710 table-header pixels and 1,291 focused-link pixels after Tab; captured
+frames also show emphasis and strike. One foreground-guarded SendInput wheel
+changed Reader pixels, while a separate attempt was blocked by OS foreground
+protection. Hardware wheel and full selection/cursor visuals remain Pending.
 
 ## Short manual completion check
 

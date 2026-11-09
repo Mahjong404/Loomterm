@@ -4,7 +4,8 @@ use crate::reader_host::ReaderHost;
 use loomterm_reader_core::{
     load_local_image,
     view::{
-        Input, LogicalSize, ResourceFailure, ResourceKind, ResourceStatus, ResourceTicket, Viewport,
+        BlockRole, Input, LogicalSize, PaintStyle, ResourceFailure, ResourceKind, ResourceStatus,
+        ResourceTicket, SurfaceRole, Viewport,
     },
     Cancellation, DecodedImage, ImageLimits, ImageLoadError, ImageReference, NodeKind,
 };
@@ -29,6 +30,35 @@ const MARGIN: i32 = 12;
 const CLASS: &str = "LoomtermReaderDocumentV1";
 const IMAGE_CACHE_BYTES: usize = 16 * 1024 * 1024;
 const IMAGE_QUEUE_LEN: usize = 16;
+const FONT_VARIANTS: usize = 16;
+const TEXT_COLOR: u32 = 0x00202020;
+const HEADING_COLOR: u32 = 0x00583B24;
+const QUOTE_COLOR: u32 = 0x0070635A;
+const LINK_COLOR: u32 = 0x00B16508;
+const CODE_BACKGROUND: u32 = 0x00F7F5F4;
+const QUOTE_BACKGROUND: u32 = 0x00F8F8F6;
+const FOCUSED_LINK_BACKGROUND: u32 = 0x00FFEFD8;
+const TABLE_HEADER_BACKGROUND: u32 = 0x00F6EFE9;
+const TABLE_BODY_BACKGROUND: u32 = 0x00FCFAF8;
+
+fn font_variant(style: &PaintStyle) -> usize {
+    usize::from(style.bold)
+        | (usize::from(style.italic) << 1)
+        | (usize::from(style.underline) << 2)
+        | (usize::from(style.strike) << 3)
+}
+
+fn text_color(style: &PaintStyle) -> u32 {
+    if style.focused_link || style.underline {
+        LINK_COLOR
+    } else if style.heading_level.is_some() {
+        HEADING_COLOR
+    } else if style.surface == SurfaceRole::Quote {
+        QUOTE_COLOR
+    } else {
+        TEXT_COLOR
+    }
+}
 
 fn fits_image_cache(used: usize, incoming: usize) -> bool {
     incoming <= IMAGE_CACHE_BYTES.saturating_sub(used)
@@ -115,7 +145,8 @@ fn wide(text: &str) -> Vec<u16> {
 struct State {
     source_path: PathBuf,
     reader: ReaderHost,
-    font: HFONT,
+    // 16 fixed style combinations; all are owned and released by this HWND.
+    fonts: [HFONT; FONT_VARIANTS],
     cell_width: i32,
     row_height: i32,
     margin: i32,
@@ -138,7 +169,7 @@ impl State {
         Ok(Box::new(Self {
             source_path: path.to_owned(),
             reader,
-            font: ptr::null_mut(),
+            fonts: [ptr::null_mut(); FONT_VARIANTS],
             cell_width: 9,
             row_height: 19,
             margin: MARGIN,
@@ -260,31 +291,43 @@ impl State {
         // All GDI handles are created, used and released on this GUI thread.
         let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
         let face = wide("Consolas");
-        let next = unsafe {
-            CreateFontW(
-                -((16 * dpi as i32) / 96),
-                0,
-                0,
-                0,
-                FW_NORMAL as i32,
-                0,
-                0,
-                0,
-                DEFAULT_CHARSET as u32,
-                OUT_DEFAULT_PRECIS as u32,
-                CLIP_DEFAULT_PRECIS as u32,
-                CLEARTYPE_QUALITY as u32,
-                FIXED_PITCH as u32,
-                face.as_ptr(),
-            )
-        };
-        if next.is_null() {
-            self.error = Some(io::Error::last_os_error().to_string());
-            return;
+        let mut next = [ptr::null_mut(); FONT_VARIANTS];
+        for (index, font) in next.iter_mut().enumerate() {
+            *font = unsafe {
+                CreateFontW(
+                    -((16 * dpi as i32) / 96),
+                    0,
+                    0,
+                    0,
+                    if index & 1 != 0 {
+                        FW_BOLD as i32
+                    } else {
+                        FW_NORMAL as i32
+                    },
+                    u32::from(index & 2 != 0),
+                    u32::from(index & 4 != 0),
+                    u32::from(index & 8 != 0),
+                    DEFAULT_CHARSET as u32,
+                    OUT_DEFAULT_PRECIS as u32,
+                    CLIP_DEFAULT_PRECIS as u32,
+                    CLEARTYPE_QUALITY as u32,
+                    FIXED_PITCH as u32,
+                    face.as_ptr(),
+                )
+            };
+            if font.is_null() {
+                self.error = Some(io::Error::last_os_error().to_string());
+                for created in next.into_iter().filter(|font| !font.is_null()) {
+                    unsafe {
+                        DeleteObject(created as HGDIOBJ);
+                    }
+                }
+                return;
+            }
         }
         let dc = unsafe { GetDC(hwnd) };
         if !dc.is_null() {
-            let old = unsafe { SelectObject(dc, next as HGDIOBJ) };
+            let old = unsafe { SelectObject(dc, next[0] as HGDIOBJ) };
             let mut extent = SIZE::default();
             let mut metrics = TEXTMETRICW::default();
             let m = wide("M");
@@ -298,12 +341,14 @@ impl State {
             self.row_height = (metrics.tmHeight + metrics.tmExternalLeading).max(1);
         }
         self.margin = ((MARGIN * dpi as i32) / 96).max(1);
-        if !self.font.is_null() {
-            unsafe {
-                DeleteObject(self.font as HGDIOBJ);
+        for font in &mut self.fonts {
+            if !font.is_null() {
+                unsafe {
+                    DeleteObject(*font as HGDIOBJ);
+                }
             }
         }
-        self.font = next;
+        self.fonts = next;
     }
 
     unsafe fn resize(&mut self, hwnd: HWND) {
@@ -341,13 +386,20 @@ impl State {
             GetClientRect(hwnd, &mut rect);
             FillRect(dc, &rect, GetSysColorBrush(COLOR_WINDOW));
             SetBkMode(dc, TRANSPARENT as i32);
-            SetTextColor(dc, 0x00202020);
+            SetTextColor(dc, TEXT_COLOR);
         }
-        let old = if self.font.is_null() {
+        let old = if self.fonts[0].is_null() {
             ptr::null_mut()
         } else {
-            unsafe { SelectObject(dc, self.font as HGDIOBJ) }
+            unsafe { SelectObject(dc, self.fonts[0] as HGDIOBJ) }
         };
+        let mut active_font = 0;
+        // Brushes are temporary paint resources; each is deleted before EndPaint.
+        let code_brush = unsafe { CreateSolidBrush(CODE_BACKGROUND) };
+        let quote_brush = unsafe { CreateSolidBrush(QUOTE_BACKGROUND) };
+        let table_header_brush = unsafe { CreateSolidBrush(TABLE_HEADER_BACKGROUND) };
+        let table_body_brush = unsafe { CreateSolidBrush(TABLE_BODY_BACKGROUND) };
+        let focused_link_brush = unsafe { CreateSolidBrush(FOCUSED_LINK_BACKGROUND) };
         let frame_result = self.reader.frame(&Cancellation::default());
         let mut image_requests = Vec::new();
         if frame_result.is_ok() {
@@ -377,6 +429,27 @@ impl State {
                     })
                     .collect();
                 for line in &frame.lines {
+                    let mut previous_table_cell = None;
+                    let line_brush = match line.role {
+                        BlockRole::Code => code_brush,
+                        BlockRole::TableRow { header: true } => table_header_brush,
+                        BlockRole::TableRow { header: false } => table_body_brush,
+                        _ if line.quote_depth > 0 => quote_brush,
+                        _ => ptr::null_mut(),
+                    };
+                    if !line_brush.is_null() {
+                        let area = RECT {
+                            left: self.margin,
+                            top: self.margin + line.y * self.row_height,
+                            right: self.margin
+                                + i32::from(frame.viewport.columns) * self.cell_width,
+                            bottom: self.margin
+                                + (line.y + i32::from(line.height)) * self.row_height,
+                        };
+                        unsafe {
+                            FillRect(dc, &area, line_brush);
+                        }
+                    }
                     for cluster in &line.clusters {
                         let x = self.margin + cluster.x * self.cell_width;
                         let y = self.margin + line.y * self.row_height;
@@ -406,6 +479,7 @@ impl State {
                             };
                             let text: Vec<u16> = label.encode_utf16().collect();
                             unsafe {
+                                SetTextColor(dc, TEXT_COLOR);
                                 TextOutW(dc, x, y, text.as_ptr(), text.len() as i32);
                             }
                             continue;
@@ -414,29 +488,54 @@ impl State {
                         if text.is_empty() {
                             continue;
                         }
-                        let selected = frame.selection.as_ref().is_some_and(|range| {
-                            cluster.source.bytes.start < range.end
-                                && cluster.source.bytes.end > range.start
-                        });
-                        if selected {
-                            let rect = RECT {
-                                left: x,
-                                top: y,
-                                right: x + cluster.width as i32 * self.cell_width,
-                                bottom: y + self.row_height,
-                            };
+                        let style = frame.paint_style(line, cluster);
+                        let variant = font_variant(&style);
+                        if variant != active_font && !self.fonts[variant].is_null() {
                             unsafe {
-                                FillRect(dc, &rect, GetSysColorBrush(COLOR_HIGHLIGHT));
-                                SetTextColor(dc, GetSysColor(COLOR_HIGHLIGHTTEXT));
+                                SelectObject(dc, self.fonts[variant] as HGDIOBJ);
+                            }
+                            active_font = variant;
+                        }
+                        let cell = RECT {
+                            left: x,
+                            top: y,
+                            right: x + cluster.width as i32 * self.cell_width,
+                            bottom: y + self.row_height,
+                        };
+                        if style.selected {
+                            unsafe {
+                                FillRect(dc, &cell, GetSysColorBrush(COLOR_HIGHLIGHT));
+                            }
+                        } else if style.focused_link && !focused_link_brush.is_null() {
+                            unsafe {
+                                FillRect(dc, &cell, focused_link_brush);
+                            }
+                        } else if style.surface == SurfaceRole::InlineCode && !code_brush.is_null()
+                        {
+                            unsafe {
+                                FillRect(dc, &cell, code_brush);
                             }
                         }
+                        if let Some(table_cell) = style.table_cell {
+                            if previous_table_cell != Some(table_cell) {
+                                let border = RECT {
+                                    right: x + 1,
+                                    ..cell
+                                };
+                                unsafe {
+                                    FillRect(dc, &border, GetSysColorBrush(COLOR_3DLIGHT));
+                                }
+                            }
+                        }
+                        previous_table_cell = style.table_cell;
+                        let color = if style.selected {
+                            unsafe { GetSysColor(COLOR_HIGHLIGHTTEXT) }
+                        } else {
+                            text_color(&style)
+                        };
                         unsafe {
+                            SetTextColor(dc, color);
                             TextOutW(dc, x, y, text.as_ptr(), text.len() as i32);
-                        }
-                        if selected {
-                            unsafe {
-                                SetTextColor(dc, 0x00202020);
-                            }
                         }
                     }
                 }
@@ -462,6 +561,19 @@ impl State {
         if !old.is_null() {
             unsafe {
                 SelectObject(dc, old);
+            }
+        }
+        for brush in [
+            code_brush,
+            quote_brush,
+            table_header_brush,
+            table_body_brush,
+            focused_link_brush,
+        ] {
+            if !brush.is_null() {
+                unsafe {
+                    DeleteObject(brush as HGDIOBJ);
+                }
             }
         }
         unsafe {
@@ -535,6 +647,13 @@ impl State {
             (false, VK_END) => {
                 unsafe {
                     self.input(hwnd, Input::End);
+                }
+                true
+            }
+            (false, VK_TAB) => {
+                let backwards = unsafe { GetKeyState(VK_SHIFT as i32) } < 0;
+                unsafe {
+                    self.input(hwnd, Input::FocusLink { backwards });
                 }
                 true
             }
@@ -632,11 +751,13 @@ impl State {
         self.selection_start = None;
         self.reset_images();
         let _ = self.reader.close();
-        if !self.font.is_null() {
-            unsafe {
-                DeleteObject(self.font as HGDIOBJ);
+        for font in &mut self.fonts {
+            if !font.is_null() {
+                unsafe {
+                    DeleteObject(*font as HGDIOBJ);
+                }
+                *font = ptr::null_mut();
             }
-            self.font = ptr::null_mut();
         }
     }
 }
@@ -861,6 +982,36 @@ mod tests {
     };
 
     #[test]
+    fn reader_paint_flags_map_to_bounded_font_and_color_roles() {
+        let mut style = PaintStyle {
+            heading_level: None,
+            bold: false,
+            italic: false,
+            strike: false,
+            monospace: false,
+            underline: false,
+            focused_link: false,
+            selected: false,
+            surface: SurfaceRole::Plain,
+            table_cell: None,
+        };
+        assert_eq!(font_variant(&style), 0);
+        assert_eq!(text_color(&style), TEXT_COLOR);
+        style.bold = true;
+        style.italic = true;
+        style.underline = true;
+        style.strike = true;
+        assert_eq!(font_variant(&style), FONT_VARIANTS - 1);
+        style.heading_level = Some(2);
+        assert_eq!(text_color(&style), LINK_COLOR);
+        style.underline = false;
+        assert_eq!(text_color(&style), HEADING_COLOR);
+        style.heading_level = None;
+        style.surface = SurfaceRole::Quote;
+        assert_eq!(text_color(&style), QUOTE_COLOR);
+    }
+
+    #[test]
     fn rgba_pixels_become_top_down_bgrx_on_white() {
         let image = DecodedImage {
             width: 3,
@@ -878,6 +1029,36 @@ mod tests {
         assert!(fits_image_cache(0, IMAGE_CACHE_BYTES));
         assert!(!fits_image_cache(1, IMAGE_CACHE_BYTES));
         assert!(!fits_image_cache(IMAGE_CACHE_BYTES, 1));
+    }
+
+    #[test]
+    fn reader_decoded_pixels_are_private_and_dropped_on_close() {
+        let path = std::env::temp_dir().join(format!(
+            "loomterm-reader-cache-owner-{}.md",
+            std::process::id()
+        ));
+        fs::write(&path, "# Reader cache ownership").unwrap();
+        let mut first = State::new(&path).unwrap();
+        let mut second = State::new(&path).unwrap();
+        for state in [&mut first, &mut second] {
+            state.image_cache.insert(
+                0,
+                CachedImage {
+                    width: 32,
+                    height: 32,
+                    bgrx: vec![0; 32 * 32 * 4],
+                },
+            );
+            state.image_cache_bytes = 32 * 32 * 4;
+        }
+        first.release();
+        assert_eq!(first.image_cache.len(), 0);
+        assert_eq!(first.image_cache_bytes, 0);
+        assert_eq!(second.image_cache.len(), 1);
+        assert_eq!(second.image_cache_bytes, 32 * 32 * 4);
+        second.release();
+        assert_eq!(second.image_cache_bytes, 0);
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

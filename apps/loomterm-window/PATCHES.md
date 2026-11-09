@@ -2,7 +2,7 @@
 
 The separate Loomterm-owned launcher now has an optional native Reader HWND
 behind `--reader-file`. This adds no WezTerm adapter patch and keeps the fixed
-Reader Core dependency at `6c63ee07d14d89dd0bda0af24139706aea8cb350`.
+Reader Core dependency at `7e11dcca3c59deb87545c75ec4f387f95e09004e`.
 GDI draws text clusters and bounded local image pixels from Core frames; DPI,
 resize, wheel, key navigation,
 selection copy and SC_CLOSE stay in the Window process. A native fixture proved
@@ -12,8 +12,12 @@ after Reader close. The image adapter has one decode worker, 16 pending visible
 requests and a 16 MiB decoded buffer cap per HWND. RGBA is composited to white
 BGRX before a top-down DIB paint. Native red/blue/alpha pixels, unchanged-text
 image refresh, truncated/over-limit placeholders and close without Shell loss
-passed. Semantic styles/formulas, physical wheel and exact wide-character
-selection remain unaccepted. Formal M3 Gate is still Pending.
+passed. The host maps Reader Core PaintStyle to bounded GDI font/color/surface
+roles; Tab/Shift+Tab focuses links without opening external targets. Fixed 7e11
+native style and image HWND cases pass; a private-cache ownership test proves
+one Reader close does not clear another Reader's decoded pixels. Formula
+resources, search UI, physical-device wheel, exact selection and terminal GPU
+release remain unaccepted. Formal M3 Gate is still Pending.
 
 The adapter targets the fixed revision in [UPSTREAM.json](UPSTREAM.json).
 It checks the original Git blob hashes before writing any of four files. Source
