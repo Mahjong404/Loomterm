@@ -2,9 +2,10 @@ use image::{
     codecs::{jpeg::JpegEncoder, png::PngEncoder, webp::WebPEncoder},
     ExtendedColorType, ImageEncoder,
 };
+use loomterm_reader_core::view::{LogicalSize, ReaderView, ViewApply, ViewLimits, Viewport};
 use loomterm_reader_core::{
     load_local_image, BlockedImage, Cancellation, ImageLimits, ImageLoadError, ImageReference,
-    ReaderError,
+    Limits, NodeKind, ReaderError,
 };
 use std::{
     fs,
@@ -100,6 +101,52 @@ fn jpeg_and_webp_are_content_sniffed_without_using_the_extension() {
         (webp.width, webp.height, webp.rgba),
         (1, 1, vec![0, 128, 255, 64])
     );
+}
+
+#[test]
+fn visible_frame_ticket_drives_local_decode_and_resource_reflow() {
+    let fixture = Fixture::new();
+    fixture.image("pic.png", &png());
+    let source = fixture.0.join("doc.md");
+    fs::write(&source, "before\n\n![alt](pic.png)\n\nafter\n").unwrap();
+    let token = Cancellation::default();
+    let mut view = ReaderView::new(
+        Limits::default(),
+        ViewLimits::default(),
+        Viewport::new(40, 20).unwrap(),
+    )
+    .unwrap();
+    let load = view.open(&source).unwrap();
+    assert_eq!(view.apply(load.execute()), ViewApply::Ready);
+    let first = view.frame(&token).unwrap();
+    let request = first
+        .resources
+        .iter()
+        .find(|item| item.kind == loomterm_reader_core::view::ResourceKind::Image)
+        .unwrap();
+    let ticket = request.ticket.clone();
+    let reference = match &first.projection.document.content.nodes[ticket.node].kind {
+        NodeKind::Image { reference, .. } => reference.clone(),
+        other => panic!("unexpected resource node: {other:?}"),
+    };
+    let decoded = load_local_image(&reference, ImageLimits::default(), &token).unwrap();
+    assert_eq!((decoded.width, decoded.height), (2, 1));
+    assert!(view
+        .resource_size(
+            &ticket,
+            LogicalSize {
+                columns: 2,
+                rows: 1
+            }
+        )
+        .unwrap());
+    let updated = view.frame(&token).unwrap();
+    assert!(!updated
+        .resources
+        .iter()
+        .any(|item| item.ticket.node == ticket.node));
+    view.close();
+    drop(decoded);
 }
 
 #[test]
