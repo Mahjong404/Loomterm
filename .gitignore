@@ -1,4 +1,4 @@
-# Build and generated output (Cargo.lock is committed for this application).
+# Build products and generated output; Cargo.lock files remain tracked.
 target/
 .zig-cache/
 zig-cache/
@@ -6,8 +6,13 @@ zig-out/
 /build/
 /dist/
 /coverage/
+*.exe
+*.dll
+*.pdb
+*.obj
+*.lib
 
-# Private research, toolchains, terminal captures, and AI experiments.
+# Local research, sessions, toolchains, captures and credentials.
 /docs/local/
 /.agents/local/
 /.codex/
@@ -21,7 +26,7 @@ zig-out/
 __pycache__/
 *.py[cod]
 
-# Local editor and operating-system state.
+# Editor and OS state.
 .idea/
 .vscode/
 *.code-workspace
