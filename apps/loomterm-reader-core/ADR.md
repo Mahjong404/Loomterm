@@ -126,8 +126,10 @@ focus and selection, and separates heading gap from ordinary block gap. The
 returned role/flags have no Win32 handles, font names, RGB colors or pixel units.
 M3 remains owner of native theme mapping, font metrics, input events and the
 Reader HWND. This additive Reader API is accepted for standalone code/tests;
-real semantic painting remains Proposed until a fixed Reader SHA is consumed
-and native screenshots/interaction are reviewed.
+real semantic painting remains Proposed for production integration. M3 consumed
+fixed Reader `7e11dcca…` in an isolated Windows build and produced a scoped
+native screenshot/Resize/Tab-focus/close fixture Pass; the M3 host patch is not
+yet in its Draft PR, and broader input/lifecycle acceptance remains Pending.
 
 For math, `pulldown-cmark` identifies inline/display regions but does not typeset
 LaTeX. [latex2mathml](https://github.com/osanshouo/latex2mathml) converts common
