@@ -331,6 +331,16 @@ another Window Client makes an old hit fail with `InvalidPosition`. The adapter
 owns query input, result index and highlight presentation; do not scan a large
 document inside WM_PAINT or duplicate the Markdown parser in the host.
 
+M3's isolated Win32 Reader adapter now exercises this fixed `7e11dcca…` API
+through one cancellable search worker, limiting native queries to 256 UTF-8
+bytes and results to 128. Its posted-message HWND fixture passed UTF-16 text
+input, F3/Enter navigation, current-hit highlighting (1,981 highlight pixels),
+and Reader close without terminating the same Shell (GDI objects 31 to 15).
+The fixture ran in an isolated M3 worktree; publication in M3 Draft PR #1
+must be verified separately. Physical foreground Ctrl+F input and broader
+search/selection acceptance remain Pending; posted messages do not certify
+physical keyboard input.
+
 Explicit link activation returns `Action::Link(LinkTarget)`; it never opens a
 browser or file. Fragment targets navigate matching local heading slugs. Local
 file links use the same document-directory/percent-decoding/local-path rules as
