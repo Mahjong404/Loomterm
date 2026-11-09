@@ -1307,6 +1307,25 @@ async fn run_client_loop(
                     );
                 }
             }
+            ClientLoopEvent::PasteOverflow { max } => {
+                let message = format!(
+                    "Paste rejected: incomplete input exceeded the framing budget; the payload limit is {max} bytes; waiting for its closing marker"
+                );
+                if let Some(shell) = state.shell.as_mut() {
+                    if shell.receive_endpoint_error(message) {
+                        if let Some(frame) =
+                            shell.compose(state.reported_size.0, state.reported_size.1)
+                        {
+                            state.present_frame(frame);
+                        }
+                    }
+                } else {
+                    warn!(
+                        max,
+                        "oversized incomplete paste before client shell became available"
+                    );
+                }
+            }
             ClientLoopEvent::Resize(
                 new_cols,
                 new_rows,

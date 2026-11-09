@@ -315,8 +315,50 @@ class Case:
         save(self.out / 'result.json', self.result)
 
 
+def m5_multi_client_viewport(case, first, second):
+    """Exercise one daemon pane through two real outer PTYs and local views."""
+    token = case.token
+    case.result['phase'] = 'm5-private-viewport'
+    first.text(f"for ((i=0;i<120;i++)); do printf 'M5H_{token}_%03d\\n' \"$i\"; done\r")
+    first.visible(f'M5H_{token}_119')
+    second.visible(f'M5H_{token}_119')
+    first.text('\x1b[5~')
+
+    def history_rows():
+        rows = [int(value) for value in re.findall(rf'M5H_{token}_(\d{{3}})',
+                                                    first.command()['screen'])]
+        return rows if rows and min(rows) < 80 and 119 not in rows else None
+
+    rows = wait_for(history_rows)
+    anchor = rows[len(rows) // 2]
+    assert f'M5H_{token}_119' in second.command()['screen']
+    second.text(f"printf 'M5NEW_{token}\\n'\r")
+    second.visible(f'M5NEW_{token}')
+    wait_for(lambda: f'M5H_{token}_{anchor:03d}' in first.command()['screen'])
+    assert f'M5NEW_{token}' not in first.command()['screen']
+    first.command(resize=[100, 20])
+    wait_for(lambda: f'M5H_{token}_' in first.command()['screen'])
+    assert f'M5NEW_{token}' not in first.command()['screen']
+    assert f'M5NEW_{token}' in second.command()['screen']
+
+    case.result['phase'] = 'm5-finite-eviction'
+    second.text(f"for ((i=0;i<500;i++)); do printf 'M5E_{token}_%03d_%064d\\n' \"$i\" 0; done\r")
+    second.visible(f'M5E_{token}_499')
+    wait_for(lambda: f'M5E_{token}_' in first.command()['screen'])
+    assert f'M5H_{token}_{anchor:03d}' not in first.command()['screen']
+    assert f'M5E_{token}_499' in second.command()['screen']
+    for _ in range(24):
+        first.text('\x1b[6~')
+    first.visible(f'M5E_{token}_499')
+    case.record('m5_viewport', anchor=anchor, finite_scrollback_bytes=16384,
+                first_rows=20, second_tail=f'M5E_{token}_499')
+
+
 def acceptance(case, concurrent):
     case.prepare()
+    if concurrent:
+        with (case.root / 'config/config.toml').open('a', encoding='utf-8') as config:
+            config.write('[advanced]\nscrollback_limit_bytes = 16384\n')
     case.result['phase'] = 'cold-start'
     hosts = [Host(case, 'first')]
     if concurrent:
@@ -350,6 +392,8 @@ def acceptance(case, concurrent):
         assert length < 4096
         case.record('wrong_version_rejected', **rejection(exact(stream, length)))
     case.record('instance', instance=instance, pane=pane, shell=shell)
+    if concurrent:
+        m5_multi_client_viewport(case, first, hosts[1])
     for host in hosts[1:]:
         host.detach()
     case.result['phase'] = 'source-tab-split'
@@ -419,6 +463,8 @@ def acceptance(case, concurrent):
                        real_tui='Pass', source_cd_tab_split='Pass', query_reply='Pass', resize='Pass',
                        detach_no_client_reply='Pass', reattach_identity='Pass', close_pane='Pass',
                        concurrent_cold='Pass' if concurrent else 'Pending',
+                       m5_private_viewport='Pass' if concurrent else 'Pending',
+                       m5_finite_eviction='Pass' if concurrent else 'Pending',
                        signal_descendant_eof='Pending', launchd_gui_shutdown='Pending'))
 
 
