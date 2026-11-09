@@ -738,6 +738,121 @@ fn pointer_selection_maps_visible_graphemes_and_marks_painted_clusters() {
 }
 
 #[test]
+fn frame_resolves_semantic_paint_roles_and_heading_spacing() {
+    let source = "# Head\n\n**strong** *em* ~~del~~ `code` [link](#head)\n\n> quote\n\n| a | b |\n|---|---|\n| x | y |\n\n```text\nabc\n```\n";
+    let mut host = MockHost::open(source, 80, 30);
+    let frame = host.frame();
+    let heading = frame
+        .lines
+        .iter()
+        .find(|line| matches!(line.role, BlockRole::Heading(1)))
+        .unwrap();
+    let paragraph = frame
+        .lines
+        .iter()
+        .find(|line| {
+            line.role == BlockRole::Paragraph && line.clusters.iter().any(|c| c.style.strong)
+        })
+        .unwrap();
+    assert_eq!(paragraph.y - heading.y, 3);
+    let painted = |needle: &str, role: BlockRole| {
+        let (line, glyph) = frame
+            .lines
+            .iter()
+            .filter(|line| line.role == role)
+            .find_map(|line| {
+                line.clusters
+                    .iter()
+                    .find(|glyph| frame.text(glyph) == needle)
+                    .map(|glyph| (line, glyph))
+            })
+            .unwrap();
+        frame.paint_style(line, glyph)
+    };
+    assert_eq!(painted("H", BlockRole::Heading(1)).heading_level, Some(1));
+    assert!(painted("H", BlockRole::Heading(1)).bold);
+    assert!(painted("s", BlockRole::Paragraph).bold);
+    assert!(painted("e", BlockRole::Paragraph).italic);
+    assert!(painted("d", BlockRole::Paragraph).strike);
+    assert_eq!(
+        painted("c", BlockRole::Paragraph).surface,
+        SurfaceRole::InlineCode
+    );
+    assert_eq!(
+        painted("q", BlockRole::Paragraph).surface,
+        SurfaceRole::Quote
+    );
+    assert_eq!(
+        painted("a", BlockRole::TableRow { header: true }).surface,
+        SurfaceRole::TableHeader
+    );
+    assert_eq!(
+        painted("x", BlockRole::TableRow { header: false }).surface,
+        SurfaceRole::TableBody
+    );
+    assert_eq!(
+        painted("a", BlockRole::TableRow { header: true }).table_cell,
+        Some(0)
+    );
+    assert_eq!(
+        painted("b", BlockRole::TableRow { header: true }).table_cell,
+        Some(1)
+    );
+    assert!(painted("a", BlockRole::TableRow { header: true }).bold);
+    let code = frame
+        .lines
+        .iter()
+        .find(|line| line.role == BlockRole::Code)
+        .unwrap();
+    assert_eq!(
+        frame.paint_style(code, &code.clusters[0]).surface,
+        SurfaceRole::CodeBlock
+    );
+    assert!(frame.paint_style(code, &code.clusters[0]).monospace);
+    drop(frame);
+    host.view
+        .input(
+            Input::FocusLink { backwards: false },
+            &Cancellation::default(),
+        )
+        .unwrap();
+    let frame = host.frame();
+    let (line, glyph) = frame
+        .lines
+        .iter()
+        .find_map(|line| {
+            line.clusters
+                .iter()
+                .find(|glyph| glyph.style.link.is_some())
+                .map(|glyph| (line, glyph))
+        })
+        .unwrap();
+    assert!(frame.paint_style(line, glyph).focused_link);
+    let start = source.find("strong").unwrap();
+    host.view
+        .input(
+            Input::Select {
+                start,
+                end: start + 6,
+            },
+            &Cancellation::default(),
+        )
+        .unwrap();
+    let selected = host.frame();
+    let (line, glyph) = selected
+        .lines
+        .iter()
+        .find_map(|line| {
+            line.clusters
+                .iter()
+                .find(|glyph| selected.text(glyph) == "s")
+                .map(|glyph| (line, glyph))
+        })
+        .unwrap();
+    assert!(selected.paint_style(line, glyph).selected);
+}
+
+#[test]
 fn pointer_edges_clamp_to_visible_source_without_reparsing() {
     let mut host = MockHost::open("left 世界 right\n\nsecond\n", 18, 8);
     let frame = host.frame();
@@ -763,3 +878,4 @@ fn pointer_edges_clamp_to_visible_source_without_reparsing() {
     assert!(frame.source_point(frame.viewport.columns, 0).is_none());
     assert!(frame.source_point(0, frame.viewport.rows).is_none());
 }
+
