@@ -4,8 +4,9 @@
 //! surface, input bridge, fonts and pixel/resource renderer are separate work.
 use loomterm_reader_core::{
     view::{
-        Action, Frame, Input, LogicalSize, Metrics, ResourceFailure, ResourceTicket, ViewApply,
-        ViewError, ViewLimits, ViewLoadRequest, ViewLoadResult, Viewport,
+        Action, Frame, Input, LogicalSize, Metrics, ResourceFailure, ResourceStatus,
+        ResourceTicket, ViewApply, ViewError, ViewLimits, ViewLoadRequest, ViewLoadResult,
+        Viewport,
     },
     Cancellation, Limits, ReaderState,
 };
@@ -247,6 +248,10 @@ impl ReaderHost {
 
     pub fn source_state(&self) -> Option<&ReaderState> {
         Some(self.view.as_ref()?.source_state())
+    }
+
+    pub fn resource_status(&self, node: usize) -> Option<ResourceStatus> {
+        self.view.as_ref()?.resource_status(node)
     }
 
     pub fn resource_size(

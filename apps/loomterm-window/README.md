@@ -234,14 +234,14 @@ budget. The test runner's separate cold-start case exited before a visible
 HWND; it does not overturn earlier cold-start acceptance. Cancellation,
 disconnect/backpressure and the shared CLI source-build closure remain Pending.
 An isolated source combination of M3, exact M5 0c6b4160 changed-file hashes
-and M4 Reader 8eaed290 passes Window crate Rust 1.96.1 metadata, fmt,
-all-target check, seven tests and strict Clippy. The full CLI offline metadata
+and M4 Reader 8eaed290 passed Window crate Rust 1.96.1 metadata, fmt,
+all-target check, seven tests and strict Clippy at that checkpoint. The full CLI offline metadata
 step lacks cached `async-broadcast` 0.7.2; M5 owns its independent CLI build.
 
 ## Reader native window (developer entry)
 
 The Window crate pins Reader Core revision
-[`8eaed290`](https://github.com/Mahjong404/Loomterm/tree/8eaed290ea56471fde8ccade9366ee0076c97ef2/apps/loomterm-reader-core)
+[`6c63ee07`](https://github.com/Mahjong404/Loomterm/tree/6c63ee07d14d89dd0bda0af24139706aea8cb350/apps/loomterm-reader-core)
 from M4. `ReaderHost` owns one logical preview slot per Window client, bounds
 loading to one active worker plus one replaceable pending request, rejects stale
 generations, forwards viewport/input changes and resource-size/failure callbacks,
@@ -253,15 +253,19 @@ absolute local source path while retaining the terminal host:
 ./target/loomterm-window/dev/loomterm-window.exe --reader-file C:\absolute\notes.md
 ```
 
-This developer entry paints Reader Core text clusters, advances bounded pending
-work, maps DPI/resize to its private viewport, handles Reader scroll/navigation
-and Clipboard copy, and closes without stopping the host, Daemon or work Shell.
+This developer entry paints Reader Core text clusters and local PNG/JPEG/WebP,
+advances bounded pending work, maps DPI/resize to its private viewport, handles
+Reader scroll/navigation and Clipboard copy, and closes without stopping the
+host, Daemon or work Shell. Image decode uses one worker and at most 16 pending
+visible requests per HWND, the Core's 4-million-pixel per-image limit and a
+16 MiB aggregate decoded-image cache. The GDI surface composites RGBA onto
+white, paints top-down BGRX and releases the cache on Reader close/reopen.
 There is one Reader HWND per launcher and one ReaderHost slot. No TUI command
-opens it yet. The GDI surface does not paint semantic styles, images or formulas;
-wide-character right-half selection and physical wheel remain Pending.
-The exact fixed Reader revision was found in the existing Cargo cache and used
-for Rust 1.96.1 builds. The one authorized isolated Git fetch of that SHA
-failed with Windows schannel SEC_E_NO_CREDENTIALS; no other SHA was fetched.
+opens it yet. Semantic styles, formulas, wide-character right-half selection
+and physical wheel remain Pending. F5 explicitly reopens the same Markdown so
+a changed local image refreshes even when the text did not change; it resets
+Reader's scroll position. The exact fixed Reader commit was fetched once into
+an isolated M3 repository and checked by full SHA; no shared branch moved.
 The terminal Window and its M3 acceptance remain independent. Reader Core's MIT license and
 dependency notices remain with that exact source revision; no Reader binaries
 or source snapshot are copied into this branch.
@@ -269,7 +273,10 @@ or source snapshot are copied into this branch.
 The private native Win32 fixture opens the actual Reader HWND, captures painted
 Markdown, resizes and sends a bounded wheel event, closes Reader via SC_CLOSE,
 and verifies terminal, Shell and Daemon survival. A missing-source case paints
-the Core error. In one close case launcher GDI objects went from 48 to 47 while
+the Core error. A native image case counted 684 red, 684 blue and 866 blended
+gray pixels; same-document F5 replacement showed 684 green and zero old red.
+Truncated and over-limit PNGs removed the old colors and showed error/limit
+placeholders. Reader close changed launcher GDI objects from 48 to 47 while
 the terminal remained alive. Foreground protection blocked physical wheel
 injection, so that device path and full selection/cursor visuals remain Pending.
 
