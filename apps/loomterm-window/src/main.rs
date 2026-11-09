@@ -4,6 +4,8 @@ use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::{env, ffi::OsString, fs, io, path::PathBuf, process::Command};
 
+pub mod reader_host;
+
 fn verify_host(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     // Verify the build-produced manifest before executing even a contract probe.
     // A plain upstream binary may initialize user logs before parsing its argv.

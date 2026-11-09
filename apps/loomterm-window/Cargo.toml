@@ -9,4 +9,5 @@ publish = false
 
 [dependencies]
 sha2 = "0.10"
+loomterm-reader-core = { git = "https://github.com/Mahjong404/Loomterm.git", rev = "8eaed290ea56471fde8ccade9366ee0076c97ef2" }
 
