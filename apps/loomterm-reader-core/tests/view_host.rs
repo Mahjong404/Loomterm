@@ -878,4 +878,3 @@ fn pointer_edges_clamp_to_visible_source_without_reparsing() {
     assert!(frame.source_point(frame.viewport.columns, 0).is_none());
     assert!(frame.source_point(0, frame.viewport.rows).is_none());
 }
-
