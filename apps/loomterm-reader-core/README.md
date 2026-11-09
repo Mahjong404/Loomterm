@@ -4,8 +4,9 @@ M4-A supplies bounded local Markdown content; M4-B adds logical document layout,
 a private viewport, navigation and a tested Mock Host adapter. The separate M3
 Window branch consumes a fixed revision for an experimental native plain-text
 Reader surface; this library itself owns no native window. It produces draw data
-without a GPU, terminal renderer or working Terminal Owner. Semantic styling,
-image/math drawing and the full M4 visual/lifecycle gates remain Pending.
+and bounded local PNG/JPEG/WebP RGBA8 decode results without a GPU, terminal
+renderer or working Terminal Owner. Semantic styling, image/math painting and
+the full M4 visual/lifecycle gates remain Pending.
 
 The crate directory is the Reader physical development/build boundary. Its own
 manifest, lockfile, source, tests and output do not change either concurrent
@@ -101,6 +102,9 @@ by a document. Caller-owned document Arcs remain alive until the caller drops th
 | Image references, including blocked/repeated refs | 256 | 4,096 |
 | Retained node string/path/table payload | 8 MiB | 32 MiB |
 | Encoded document/image path bytes | 32 KiB | 32 KiB |
+| Local image encoded file bytes per decode | 8 MiB | 16 MiB |
+| Local image output pixels per decode | 4 million | 8 million |
+| Local image width or height | 8,192 | 16,384 |
 
 Budgets can be lowered to zero. Exceeding a budget fails the entire candidate;
 partial content is never installed. Reads use a 16 KiB stack buffer and at most
@@ -127,8 +131,8 @@ single parser construction/iteration. Parser scratch is bounded indirectly by
 the source ceiling, not by a hard allocator or execution-time quota. Run on a
 bounded worker; no UI responsiveness or sandbox claim follows from these tests.
 
-Image parsing performs **zero filesystem/network I/O**. References resolve as
-follows:
+Markdown image parsing performs **zero filesystem/network I/O**. References
+resolve as follows:
 
 - Relative image paths use the source document's directory, never Shell cwd or
   Workspace Source Folder. Absolute local paths and `..` are allowed by OS
@@ -138,9 +142,29 @@ follows:
   blocked with a reason. `file:`, `data:`, remote URLs and protocol-relative paths
   are not loaded. No filesystem existence check occurs while parsing.
 - `ImageReference::Local` is a candidate path, not an open handle, decoded image
-  or authorization grant. A future image loader must revalidate at open time,
-  enforce image byte/pixel/cache budgets and reject network/reparse targets.
-  Broken images can then be reported without losing the Markdown document.
+  or authorization grant. The explicit loader revalidates it at open time and
+  applies the source reader's regular-file/reparse checks. Broken images return
+  an image error without losing the Markdown document.
+
+`load_local_image(reference, ImageLimits, &Cancellation)` runs synchronously on
+the host's bounded worker. It sniffs file contents and accepts only PNG, JPEG
+and WebP; it never loads a URL. The result is owned, top-down, tightly packed
+RGBA8 with `width`, `height`, `stride_bytes()` and `rgba`. The host pairs that
+result with the requesting `ResourceTicket`, rejects stale tickets before paint,
+and drops buffers when the per-client window closes. For a visible image request,
+`frame.projection.document.content.nodes[ticket.node].kind` supplies its
+`ImageReference`; the host calls the decoder on a bounded worker, then converts
+pixel dimensions to `LogicalSize` for `resource_size` on the UI state owner.
+`ImageLoadError` distinguishes blocked, missing/open/read, encoded-byte, pixel/
+dimension, decoder-budget, unsupported-format and corrupt-decode failures.
+Image files are not held
+open after return. Encoded bytes, dimensions and RGBA output pixels have checked
+per-decode ceilings; decoder `max_alloc` is a best-effort setting, **not** a hard
+peak-RSS or CPU quota. Cancellation is checked during file reading and before/
+after codec work, not inside a codec. The host must additionally cap aggregate
+decoded buffers and worker concurrency. Local file changes require re-requesting
+that image resource. Real image placement/painting has not yet been accepted in
+the native Window.
 
 ## Display a document
 
@@ -194,7 +218,8 @@ Code is split into bounded no-wrap logical lines. Table rows use preferred cell
 widths and Markdown alignment; they also remain unwrapped. `Input::Horizontal`
 scrolls overflowing code/table rows without moving wrapped paragraphs. Extremely
 wide rows or code lines fail the block budget explicitly. Images and math are
-object placeholders; their AST nodes retain alt text/reference or formula source.
+object placeholders in the frame; the image decoder is a separate resource API.
+Their AST nodes retain alt text/reference or formula source.
 Raw HTML stays literal and C0 controls other than tabs/newlines become U+FFFD.
 The host must paint literal text and clip every draw operation to the viewport,
 including partly visible wide graphemes and resource boxes with negative origins.
@@ -349,6 +374,7 @@ cargo check --workspace --all-targets --locked --target x86_64-pc-windows-msvc
 cargo test --locked --target x86_64-pc-windows-msvc
 cargo clippy --workspace --all-targets --locked --target x86_64-pc-windows-msvc -- -D warnings
 cargo bench --bench bounded --locked --target x86_64-pc-windows-msvc
+cargo bench --bench image --locked --target x86_64-pc-windows-msvc
 cargo bench --bench view --locked --target x86_64-pc-windows-msvc
 ```
 
@@ -363,15 +389,19 @@ The core benchmark measures five parses of fixed 376,832-byte input (81,921 node
 The view benchmark measures read/parse/projection, first visible layout,
 200 bidirectional scrolls, 20 resizes and unchanged/changed reloads of 10,000
 paragraphs. Its owned `target/view-bench-files/<pid>` directory is removed on
-Drop. Mock Host fixtures use `target/view-fixtures`. Both benchmarks print JSON
-and set no machine-dependent timing gate or peak-RSS claim.
+Drop. Mock Host fixtures use `target/view-fixtures`. Core/view benchmarks print JSON
+and set no machine-dependent timing gate or peak-RSS claim. The separate image
+benchmark decodes generated local 256² and 1024² PNG files 20 times each,
+reports median and nearest-rank P95 elapsed microseconds, and removes its
+per-process fixture files. Its numbers are codec/I/O timings, not Window frame
+timings or resident-memory measurements.
 
-Windows 11 x64/MSVC validation on 2026-11-08 passed fixed Rust 1.96.1 metadata,
-fmt, check, strict Clippy, 26 unit/integration tests and two compiled API examples.
+Windows 11 x64/MSVC validation on 2026-11-09 passed fixed Rust 1.96.1 metadata,
+fmt, check, strict Clippy, 32 unit/integration tests and two compiled API examples.
 Mock Host coverage includes semantic/grapheme layout, 10,000 paragraphs, long
 code, wide tables, resource reflow, refresh anchors, search/headings/links,
 selection, rapid scroll/resize, cancel/stale jobs, private-state isolation,
 budget/error paths and resource release. Linux/macOS runtime behavior, Unix
-symlink tests, hostile filesystem races, visual rendering, formula readability,
-image decode/display and real window lifecycle/reading interactions remain
+symlink tests, hostile filesystem races, semantic visual styling, formula readability,
+native image display and full window lifecycle/reading interactions remain
 unverified. These checks do not close M3, M4 UI or M6 performance gates.
