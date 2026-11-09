@@ -1235,7 +1235,9 @@ mod tests {
 
     #[test]
     fn m5_unix_pty_accepts_full_decoded_paste_plus_markers() {
-        let (handle, _peer, _read_rx) = actor_with_socket_pair(true);
+        let (handle, mut peer, _read_rx) = actor_with_socket_pair(false);
+        peer.set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("bounded PTY read timeout");
         let max = budget::MAX_USER_WRITE_BYTES;
         assert_eq!(
             max,
@@ -1244,6 +1246,10 @@ mod tests {
         handle
             .try_write_user_input(Bytes::from(vec![b'x'; max]))
             .expect("full admitted bracketed paste fits actor budget");
+        let mut received = vec![0; max];
+        peer.read_exact(&mut received)
+            .expect("actor forwards all admitted PTY bytes");
+        assert!(received.iter().all(|byte| *byte == b'x'));
         assert!(matches!(
             handle.try_write_user_input(Bytes::from(vec![b'x'; max + 1])),
             Err(mpsc::error::TrySendError::Full(_))

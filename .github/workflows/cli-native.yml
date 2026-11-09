@@ -4,7 +4,7 @@
 name: Loomterm Unix native
 on:
   push:
-    branches: [main, codex/m5-client-viewport]
+    branches: [main]
     paths:
       - '.github/workflows/cli-native.yml'
       - 'apps/loomterm-cli/**'
