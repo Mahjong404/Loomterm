@@ -1785,6 +1785,36 @@ mod tests {
     }
 
     #[test]
+    fn encoder_resize_replay_overwrites_reflowed_prompt() {
+        let mut terminal = crate::ghostty::Terminal::new(12, 4, 0).unwrap();
+        terminal.write(b"\x1b[?1049h");
+        let mut encoder = BlitEncoder::new();
+        for (width, height) in [(12, 4), (5, 3), (17, 5), (8, 3)] {
+            terminal.resize(width, height, 8, 16).unwrap();
+            let prompt = b"PS C:/long/project/path> ";
+            let cells = (0..usize::from(width) * usize::from(height))
+                .map(|i| make_cell(&(prompt[i % prompt.len()] as char).to_string(), 0, 0, 0))
+                .collect();
+            let frame = make_frame(width, height, cells);
+            let encoded = encoder.encode(&frame, false);
+            terminal.write(&encoded.bytes);
+            for row in 0..height {
+                for col in 0..width {
+                    let (_, actual) = terminal.screen_cell(col, u32::from(row)).unwrap();
+                    let expected = prompt
+                        [(usize::from(row) * usize::from(width) + usize::from(col)) % prompt.len()];
+                    assert_eq!(
+                        actual,
+                        vec![u32::from(expected)],
+                        "{width}x{height} at {col},{row}"
+                    );
+                }
+            }
+            encoder.commit(frame, encoded);
+        }
+    }
+
+    #[test]
     fn encoder_forced_repaint_writes_all_cells_without_clearing() {
         let frame = make_frame(3, 2, vec![make_cell("A", 0, 0, 0); 6]);
         let mut encoder = BlitEncoder::new();

@@ -10,6 +10,10 @@ use tokio::sync::{mpsc, Notify};
 use crate::events::AppEvent;
 use crate::layout::PaneId;
 
+#[cfg(all(test, windows))]
+#[path = "runtime/windows_input_tests.rs"]
+mod windows_input_tests;
+
 /// Live runtime for a server-owned terminal.
 ///
 /// The PTY implementation still delegates to the legacy pane runtime while the

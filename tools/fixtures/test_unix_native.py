@@ -21,6 +21,103 @@ runner = module('unix_runner', Path(__file__).parents[1] / 'test-unix-native.py'
 
 
 class Guards(unittest.TestCase):
+    def test_lint_configuration_rejects_missing_changed_or_foreign_config(self):
+        import hashlib
+        with tempfile.TemporaryDirectory(prefix='lt-config-') as directory:
+            app = Path(directory)
+            content = b'too-many-arguments-threshold = 11\n'
+            expected = hashlib.sha256(content).hexdigest()
+            (app / 'UPSTREAM.json').write_text(json.dumps(dict(files=[dict(path='clippy.toml', sha256=expected)])))
+            config = app / 'clippy.toml'
+            with self.assertRaisesRegex(RuntimeError, 'source delivery'):
+                runner.lint_configuration(app, {})
+            config.write_bytes(content.replace(b'11', b'7'))
+            with self.assertRaisesRegex(RuntimeError, 'source delivery'):
+                runner.lint_configuration(app, {})
+            config.write_bytes(content)
+            self.assertEqual(runner.lint_configuration(app, {})['sha256'], expected)
+            with self.assertRaisesRegex(RuntimeError, 'outside'):
+                runner.lint_configuration(app, {'CLIPPY_CONF_DIR': str(app / 'foreign')})
+
+    def test_threshold_probe_requires_both_positive_and_negative_control(self):
+        with tempfile.TemporaryDirectory(prefix='lt-threshold-') as directory:
+            app = Path(directory)
+            calls = []
+            def driver(argv, **kwargs):
+                self.assertEqual(kwargs['cwd'], app)
+                self.assertEqual(argv[:4], ['rustup', 'run', '1.96.1', 'clippy-driver'])
+                count = Path(argv[4]).read_text().count(': u8')
+                calls.append(count)
+                if count == 12:
+                    kwargs['stdout'].write(json.dumps(dict(level='error', code=dict(code='clippy::too_many_arguments'),
+                        message='this function has too many arguments (12/11)', spans=[{}])).encode())
+                return SimpleNamespace(returncode=0 if count == 11 else 1)
+            with patch.object(runner.subprocess, 'run', side_effect=driver):
+                self.assertEqual(runner.clippy_threshold_probe(app, app, {})['threshold'], 11)
+            self.assertEqual(calls, [11, 12])
+            with patch.object(runner.subprocess, 'run', return_value=SimpleNamespace(returncode=0)):
+                with self.assertRaisesRegex(RuntimeError, 'threshold'):
+                    runner.clippy_threshold_probe(app, app, {})
+
+    def test_clippy_export_deduplicates_targets_without_source_or_rendered_text(self):
+        with tempfile.TemporaryDirectory(prefix='lt-clippy-json-') as directory:
+            app = Path(directory) / 'app'
+            (app / 'src').mkdir(parents=True)
+            (app / 'src/main.rs').write_text('fn inherited() {}\n')
+            message = dict(reason='compiler-message', manifest_path=str(app / 'Cargo.toml'),
+                           target=dict(name='loomterm', kind=['bin']),
+                           message=dict(level='error', code=dict(code='clippy::too_many_arguments'),
+                                        message='this function has too many arguments (8/7)',
+                                        rendered='PRIVATE_RENDERED',
+                                        spans=[dict(file_name='src/main.rs', line_start=1, column_start=1,
+                                                    is_primary=True, text=[dict(text='fn inherited(PRIVATE_SOURCE)')])]))
+            log = Path(directory) / 'clippy.log'
+            log.write_text(json.dumps(message) + '\n' + json.dumps(message) + '\n')
+            result = runner.clippy_diagnostics(log, app)
+            self.assertTrue(result['complete'])
+            self.assertEqual(result['occurrences'], 2)
+            self.assertEqual(len(result['records']), 1)
+            record = result['records'][0]
+            self.assertEqual((record['path'], record['actual_args'], record['threshold']), ('src/main.rs', 8, 7))
+            self.assertEqual(record['occurrences'], 2)
+            exported = json.dumps(result)
+            for forbidden in (directory, 'PRIVATE_RENDERED', 'PRIVATE_SOURCE', 'manifest_path'):
+                self.assertNotIn(forbidden, exported)
+
+    def test_clippy_export_rejects_external_paths_and_marks_incomplete(self):
+        with tempfile.TemporaryDirectory(prefix='lt-clippy-foreign-') as directory:
+            app = Path(directory) / 'app'
+            app.mkdir()
+            log = Path(directory) / 'clippy.log'
+            log.write_text(json.dumps(dict(reason='compiler-message', target=dict(name='loomterm', kind=['bin']),
+                message=dict(level='error', code=dict(code='clippy::too_many_arguments'),
+                             message='PRIVATE_MESSAGE', spans=[dict(file_name=str(Path.home() / 'private.rs'),
+                             line_start=1, column_start=1, is_primary=True)]))) + '\n')
+            report = runner.clippy_diagnostics(log, app)
+            self.assertFalse(report['complete'])
+            self.assertEqual(report['rejected'], 1)
+            self.assertEqual(report['records'], [])
+            self.assertNotIn('PRIVATE_MESSAGE', json.dumps(report))
+
+    def test_clippy_export_bounds_unique_records_and_reports_truncation(self):
+        with tempfile.TemporaryDirectory(prefix='lt-clippy-cap-') as directory:
+            app = Path(directory) / 'app'
+            (app / 'src').mkdir(parents=True)
+            (app / 'src/main.rs').write_text('// synthetic compiler input\n')
+            log = Path(directory) / 'clippy.log'
+            lines = []
+            for line in range(1, 151):
+                lines.append(json.dumps(dict(reason='compiler-message', target=dict(name='loomterm', kind=['bin']),
+                    message=dict(level='error', code=dict(code='clippy::too_many_arguments'),
+                    message='this function has too many arguments (8/7)', spans=[dict(file_name='src/main.rs',
+                    line_start=line, column_start=1, is_primary=True)]))))
+            log.write_text('\n'.join(lines))
+            result = runner.clippy_diagnostics(log, app)
+            self.assertFalse(result['complete'])
+            self.assertTrue(result['truncated'])
+            self.assertEqual(len(result['records']), 128)
+            self.assertLessEqual(len(json.dumps(result).encode()), 65536)
+
     def test_boundary_events_require_the_new_child_token(self):
         records = []
         text = '\n'.join(json.dumps(dict(event='ready', token=token, pid=pid))
@@ -128,7 +225,7 @@ class Guards(unittest.TestCase):
                     text = 'cargo 1.96.1 (fixture)\n'
                 elif argv[0] == 'zig':
                     text = '0.16.0\n'
-                elif '--message-format=json' in argv:
+                elif argv[:2] == ['cargo', 'test'] and '--message-format=json' in argv:
                     for name in ('loomterm', 'loomterm_native'):
                         file = out / name
                         file.write_bytes(b'synthetic, never executed')
@@ -139,11 +236,14 @@ class Guards(unittest.TestCase):
                 elif argv[0] == 'cc' and '-o' in argv and '-###' not in argv:
                     Path(argv[argv.index('-o') + 1]).write_bytes(b'synthetic fixture, never executed')
                 elif argv[:2] == ['cargo', 'clippy']:
-                    code, text = 101, 'controlled lint failure\n'
+                    code, text = 101, json.dumps(dict(reason='compiler-message',
+                        message=dict(level='error', code=dict(code='clippy::too_many_arguments'),
+                        message='this function has too many arguments (8/7)', rendered='PRIVATE_RENDERED',
+                        spans=[dict(file_name='src/main.rs', line_start=1, column_start=1, is_primary=True)]))) + '\n'
                 if 'stdout' in kwargs:
                     kwargs['stdout'].write(text.encode())
                 return SimpleNamespace(pid=123, wait=lambda _timeout: code)
-            with patch.object(runner, 'target', return_value='x86_64-unknown-linux-gnu'), patch.object(runner.sys, 'platform', 'linux'), patch.object(runner.shutil, 'which', return_value='synthetic-tool'), patch.object(runner.platform, 'uname', return_value=namedtuple('Uname', 'system node release version machine processor')('Linux', 'fixture', 'kernel', 'version', 'x86_64', 'cpu')), patch.object(runner.subprocess, 'Popen', side_effect=tool), patch.object(runner.sys, 'argv', ['native-test', '--evidence', str(out)]), patch.dict(runner.os.environ), patch.object(Path, 'read_text', autospec=True, side_effect=Path.read_text) as _read, patch('builtins.print'):
+            with patch.object(runner, 'clippy_threshold_probe', return_value=dict(status='Pass', threshold=11)), patch.object(runner, 'target', return_value='x86_64-unknown-linux-gnu'), patch.object(runner.sys, 'platform', 'linux'), patch.object(runner.shutil, 'which', return_value='synthetic-tool'), patch.object(runner.platform, 'uname', return_value=namedtuple('Uname', 'system node release version machine processor')('Linux', 'fixture', 'kernel', 'version', 'x86_64', 'cpu')), patch.object(runner.subprocess, 'Popen', side_effect=tool), patch.object(runner.sys, 'argv', ['native-test', '--evidence', str(out)]), patch.dict(runner.os.environ), patch.object(Path, 'read_text', autospec=True, side_effect=Path.read_text) as _read, patch('builtins.print'):
                 runner.os.environ.pop('LOOMTERM_NATIVE_MANIFEST', None)
                 # /etc/os-release is inventory-only; keep this unit test portable.
                 original_read = _read.side_effect
@@ -153,7 +253,9 @@ class Guards(unittest.TestCase):
             self.assertIn('native-controller', summary['completed_phases'], summary.get('error'))
             self.assertEqual(summary['status'], 'Fail')
             self.assertEqual(summary['active_phase'], 'clippy')
-            self.assertIn('controlled lint failure', summary['diagnostic_tail'])
+            self.assertIn('clippy::too_many_arguments src/main.rs:1:1', summary['diagnostic_tail'])
+            self.assertNotIn('PRIVATE_RENDERED', json.dumps(summary))
+            self.assertTrue(summary['clippy_diagnostics']['complete'])
             self.assertTrue(any('unix-native.py' in item for item in order[:-1]))
             self.assertEqual(order[-1], 'cargo clippy')
 
@@ -184,7 +286,7 @@ class Guards(unittest.TestCase):
             self.assertEqual(summary['active_phase'], 'version-rustc')
             self.assertIn('exited 1', summary['error'])
             self.assertIn('controlled prerequisite failure', summary['diagnostic_tail'])
-            self.assertEqual(summary['completed_phases'], [])
+            self.assertEqual(summary['completed_phases'], ['lint-configuration'])
 
     def test_failure_diagnostic_is_bounded_and_redacts_paths(self):
         with tempfile.TemporaryDirectory(prefix='lt-diagnostic-') as directory:
