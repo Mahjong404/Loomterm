@@ -194,8 +194,9 @@ if view.apply(result) == ViewApply::Ready {
         for line in &frame.lines {
             for cluster in &line.clusters {
                 let literal_text = frame.text(cluster);
-                // Host clips and paints literal_text using semantic style/role.
-                let _ = literal_text;
+                let paint = frame.paint_style(line, cluster);
+                // Host clips and paints literal_text using paint and its theme.
+                let _ = (literal_text, paint);
             }
         }
     }
@@ -208,8 +209,19 @@ view.close();
 Heading levels, block roles, quote/list depth, emphasis/strong/strike/code/link
 styles and table cell identities are semantic theme inputs. The host chooses
 fonts, palette and pixel scale. `Viewport` is 1..1024 logical columns by 1..256
-rows; `Metrics` configures indentation, spacing, tab stops, ambiguous CJK widths
+rows; `Metrics` configures indentation, block/heading gaps, tab stops, ambiguous CJK widths
 and image/math placeholders. These units do not allocate a terminal grid.
+
+`Frame::paint_style(line, cluster)` resolves heading level, weight, italic,
+strikethrough, inline/code-block/quote/table surface, table column, link underline
+and focus, and Reader-only selection into a value without colors or pixel sizes.
+The host paints the full code-block line surface, including empty lines; table
+separators remain literal bounded draw clusters. `Metrics::heading_gap` defaults
+to two logical rows (ordinary blocks one) and triggers anchor-preserving reflow
+through `set_metrics`. `DrawLine::list_depth` and `quote_depth` keep the host's
+indent guides separate from the literal projected text. Heading font size and
+actual glyph advances must be reconciled by the native adapter; the logical
+column model does not certify proportional-font wrapping or pixel-perfect layout.
 
 Wrapping uses whole extended graphemes, Unicode line-break opportunities and
 Unicode display widths, including CJK and emoji sequences. A word exceeding the
@@ -327,6 +339,13 @@ returns `resource_size(ticket, LogicalSize)` or `resource_failed`. Sizes are
 resource results from reflowing a newer document or another client. Pending
 requests may recur until resolved; they do not start work themselves.
 
+Inline `$...$` and display `$$...$$` become math syntax nodes; the Reader parser
+does not validate LaTeX commands. The current host still has no math renderer,
+so formula readability is Pending. A raster path could reuse the native RGBA8
+image surface, but any dependency must first pass fixed-version, font-license,
+command/depth/output-pixel budget and Windows-host integration checks. Converting
+to MathML alone would not make GDI paint formulas.
+
 ## M3 adapter and M4-C entry conditions
 
 The small adapter contract is `ReaderView::{open,refresh,poll,apply,resize,frame,
@@ -400,7 +419,7 @@ per-process fixture files. Its numbers are codec/I/O timings, not Window frame
 timings or resident-memory measurements.
 
 Windows 11 x64/MSVC validation on 2026-11-09 passed fixed Rust 1.96.1 metadata,
-fmt, check, strict Clippy, 33 unit/integration tests and two compiled API examples.
+fmt, check, strict Clippy, 35 unit/integration tests and two compiled API examples.
 Mock Host coverage includes a visible image ticket through local decode and
 resource-size reflow, semantic/grapheme layout, 10,000 paragraphs, long
 code, wide tables, resource reflow, refresh anchors, search/headings/links,
