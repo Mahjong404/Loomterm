@@ -356,6 +356,18 @@ to fixed Reader `7e11dcca…`. Physical foreground Ctrl+F input and broader
 search/selection acceptance remain Pending; posted messages do not certify
 physical keyboard input.
 
+M3's subsequent isolated native evaluation consumes the additive fractional
+pointer API and per-row horizontal clamp. Posted mouse dragging changes the
+selection highlight; posted horizontal-wheel input moves long code while a
+fitting adjacent table stays pixel-identical at 96 DPI. Two independent Window
+Clients retain separate Reader HWNDs and view state: scrolling/closing A leaves
+B's settled frame unchanged, and B survives A's main-window close. Each Reader
+close reduced GDI objects from 31 to 15 while preserving the same working Shell.
+These are scoped HWND/posted-input results. Physical input and exact Clipboard
+contents remain Pending; the fixture preserves existing non-text clipboard
+formats. M3's published dependency pin remains `7e11dcca…` pending its own
+fixed-revision integration; the isolated evaluation does not update that pin.
+
 Explicit link activation returns `Action::Link(LinkTarget)`; it never opens a
 browser or file. Fragment targets navigate matching local heading slugs. Local
 file links use the same document-directory/percent-decoding/local-path rules as
