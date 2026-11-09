@@ -234,7 +234,11 @@ font shaping, BiDi, kerning and proportional pixel measurement remain host work.
 
 Code is split into bounded no-wrap logical lines. Table rows use preferred cell
 widths and Markdown alignment; they also remain unwrapped. `Input::Horizontal`
-scrolls overflowing code/table rows without moving wrapped paragraphs. Extremely
+scrolls overflowing code/table rows without moving wrapped paragraphs or fitting
+rows. Each row clamps its shift to its own overflow. The input offset is bounded
+by the latest visible frame's horizontal extent, so reversing at the right edge
+responds immediately; a host obtains a frame before forwarding horizontal input.
+Extremely
 wide rows or code lines fail the block budget explicitly. Images and math are
 object placeholders in the frame; the image decoder is a separate resource API.
 Their AST nodes retain alt text/reference or formula source.
@@ -494,14 +498,16 @@ broader native image behavior and full window lifecycle/reading interactions
 remain unverified. These checks do not close M3, M4 UI or M6 performance gates.
 
 Windows 11/MSVC follow-up on 2026-11-10 passed fixed Rust 1.96.1 locked/offline
-metadata, fmt, all-target/all-feature check, strict Clippy, 36 default tests,
-40 math-enabled tests and two compiled API examples. New coverage includes
+metadata, fmt, all-target/all-feature check, strict Clippy, 37 default tests,
+41 math-enabled tests and two compiled API examples. New coverage includes
 fractional/cross-line grapheme selection and refresh invalidation, real offline
 formula RGBA, invalid/over-budget/cancelled expressions, DPI-scaled dimensions,
-and revision-ticket reflow/close rejection. The raster example is executable
+revision-ticket reflow/close rejection, and horizontal edge/reverse/Resize
+behavior that keeps narrow tables and short code rows visible. The raster example is executable
 evidence, not a native Reader window.
 
-The finite math benchmark measured a 173×59 quadratic formula: first call
+The finite math benchmark on the initial offline-raster revision measured a
+173×59 quadratic formula: first call
 1,959 µs, then 20 warm calls with median/P95 153/168 µs. A separate fresh-process
 Windows memory observation reported 6,217,728 bytes peak working set and
 1,875,968 bytes peak PagefileUsage for that standalone benchmark. These are

@@ -184,3 +184,9 @@ pixel/font/DPI conversion, capture, Clipboard and window lifetime. It must
 revalidate frames, keep grapheme source boundaries, and clamp captured pointer
 coordinates without truncating half-cell precision. This changes no terminal
 ownership, shared scrollback or lifecycle.
+
+An actual native horizontal-wheel fixture exposed a shared-offset defect:
+reading a long code line also hid a fitting table. Clamp each nonwrapping row
+to its own measured overflow and bound input by the most recent visible frame's
+extent. This keeps short rows visible and makes reverse input immediate at an
+edge, without rescanning or parsing the document on each wheel event.

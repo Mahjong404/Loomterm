@@ -35,6 +35,7 @@ pub(super) struct ViewState {
     position: Position,
     pending_anchor: Option<DisplayAnchor>,
     horizontal: u32,
+    horizontal_extent: u32,
     heights: Heights,
     cache: BTreeMap<usize, Cached>,
     cache_bytes: usize,
@@ -64,6 +65,7 @@ impl ViewState {
             position: Position::default(),
             pending_anchor: None,
             horizontal: 0,
+            horizontal_extent: 0,
             heights,
             cache: BTreeMap::new(),
             cache_bytes: 0,
@@ -255,6 +257,7 @@ impl ViewState {
         let mut lines = Vec::new();
         let mut resources = BTreeSet::new();
         let mut clusters = 0;
+        let mut horizontal_extent = 0u32;
         let mut block = self.position.block;
         let mut y = -(self.position.row as i32);
         let mut pending = false;
@@ -271,16 +274,21 @@ impl ViewState {
             }
             let page = self.page(block, cancel)?;
             let semantic = &self.projection.blocks[block];
-            let shift = if semantic.wraps() {
-                0
-            } else {
-                self.horizontal as i32
-            };
             for line in &page.lines {
                 let top = y + line.y as i32;
                 if top + i32::from(line.height) <= 0 || top >= i32::from(self.viewport.rows) {
                     continue;
                 }
+                let overflow = if semantic.wraps() {
+                    0
+                } else {
+                    line.atoms.last().map_or(0, |a| {
+                        (a.glyph.x + a.glyph.width as i32 - i32::from(self.viewport.columns)).max(0)
+                            as u32
+                    })
+                };
+                horizontal_extent = horizontal_extent.max(overflow);
+                let shift = self.horizontal.min(overflow) as i32;
                 let mut visible = Vec::new();
                 for atom in &line.atoms {
                     let mut glyph = atom.glyph.clone();
@@ -319,6 +327,8 @@ impl ViewState {
         if pending && self.heights.count == before {
             return Err(ViewError::Budget(ViewResource::CacheBytes));
         }
+        self.horizontal_extent = horizontal_extent;
+        self.horizontal = self.horizontal.min(horizontal_extent);
         let resources = resources
             .into_iter()
             .filter(|id| !self.sizes.contains_key(id) && !self.failures.contains_key(id))
@@ -526,7 +536,10 @@ impl ViewState {
                 }
             }
             Input::Horizontal(n) => {
-                self.horizontal = self.horizontal.saturating_add_signed(n).min(1 << 24);
+                self.horizontal = self
+                    .horizontal
+                    .saturating_add_signed(n)
+                    .min(self.horizontal_extent);
             }
             Input::Heading(index) => {
                 let heading = self

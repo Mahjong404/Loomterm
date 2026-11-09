@@ -795,6 +795,55 @@ fn fractional_pointer_selection_crosses_lines_without_splitting_graphemes() {
 }
 
 #[test]
+fn horizontal_reading_keeps_short_rows_visible_and_reverses_at_the_edge() {
+    let wide = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let mut host = MockHost::open(
+        &format!("paragraph\n\n~~~text\nshort\n{wide}\n~~~\n\n| k | v |\n|---|---|\n| a | b |\n"),
+        12,
+        20,
+    );
+    let before = host.frame();
+    let tables = |frame: &Frame| {
+        frame
+            .lines
+            .iter()
+            .filter(|line| matches!(line.role, BlockRole::TableRow { .. }))
+            .map(|line| {
+                line.clusters
+                    .iter()
+                    .map(|c| (c.x, frame.text(c).to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    let code_text = |frame: &Frame| {
+        frame
+            .lines
+            .iter()
+            .filter(|line| line.role == BlockRole::Code)
+            .map(|line| {
+                line.clusters
+                    .iter()
+                    .map(|c| frame.text(c))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+    };
+    host.view
+        .input(Input::Horizontal(i32::MAX), &Cancellation::default())
+        .unwrap();
+    let end = host.frame();
+    assert_eq!(tables(&before), tables(&end));
+    assert_eq!(code_text(&end), ["short", "OPQRSTUVWXYZ"]);
+    host.view
+        .input(Input::Horizontal(-1), &Cancellation::default())
+        .unwrap();
+    assert_eq!(code_text(&host.frame()), ["short", "NOPQRSTUVWXY"]);
+    host.view.resize(Viewport::new(40, 20).unwrap()).unwrap();
+    assert_eq!(code_text(&host.frame()), ["short", wide]);
+}
+
+#[test]
 fn frame_resolves_semantic_paint_roles_and_heading_spacing() {
     let source = "# Head\n\n**strong** *em* ~~del~~ `code` [link](#head)\n\n> quote\n\n| a | b |\n|---|---|\n| x | y |\n\n```text\nabc\n```\n";
     let mut host = MockHost::open(source, 80, 30);
