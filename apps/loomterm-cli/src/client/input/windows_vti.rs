@@ -279,7 +279,7 @@ impl WindowsInputHandoff {
             || cost > Self::MAX_BYTES.saturating_sub(self.queued_bytes)
         {
             self.failed = true;
-            tracing::error!("Windows input backlog exhausted; current batch rejected; detaching client after admitted input drains; work remains running");
+            tracing::error!(cost, queued_bytes = self.queued_bytes, limit = Self::MAX_BYTES, "Windows input backlog exhausted; current batch rejected; detaching client after admitted input drains; work remains running");
             return;
         }
         if self.backpressured {
@@ -420,7 +420,7 @@ fn windows_mouse_motion_can_replace(
 fn windows_console_input_items(
     handle: windows_sys::Win32::Foundation::HANDLE,
     mapper: &mut WindowsInputMapper,
-    mut trace: Option<&mut WindowsInputTraceBatch>,
+    trace: Option<&mut WindowsInputTraceBatch>,
 ) -> WindowsInputItems {
     const WAIT_OBJECT_0: u32 = 0;
     const WAIT_TIMEOUT: u32 = 258;
@@ -431,7 +431,7 @@ fn windows_console_input_items(
         _ => return WindowsInputItems::Closed,
     }
 
-    let mut records = [windows_sys::Win32::System::Console::INPUT_RECORD::default(); 512];
+    let mut records = [windows_sys::Win32::System::Console::INPUT_RECORD::default(); 4096];
     let mut read = 0;
     let ok = unsafe {
         windows_sys::Win32::System::Console::ReadConsoleInputW(
@@ -445,15 +445,19 @@ fn windows_console_input_items(
         return WindowsInputItems::Closed;
     }
 
-    let mut items = Vec::new();
-    for record in records.iter().take(read as usize) {
-        if let Some(record) = windows_console_input_record_from_os(*record) {
-            if let (Some(trace), WindowsInputRecord::Key(key)) = (trace.as_deref_mut(), record) {
+    if let Some(trace) = trace {
+        for raw in records.iter().take(read as usize) {
+            if let Some(WindowsInputRecord::Key(key)) = windows_console_input_record_from_os(*raw) {
                 trace.raw_keys.push(key);
             }
-            items.extend(mapper.translate(record));
         }
     }
+    let items = mapper.translate_batch(
+        records
+            .iter()
+            .take(read as usize)
+            .filter_map(|record| windows_console_input_record_from_os(*record)),
+    );
     WindowsInputItems::Items(items)
 }
 
@@ -581,6 +585,9 @@ enum EscapeOrigin {
 #[derive(Default)]
 struct WindowsWin32InputModeFramer {
     buffer: Vec<u8>,
+    scan_from: usize,
+    #[cfg(test)]
+    scan_steps: usize,
 }
 
 enum WindowsWin32InputModeItem {
@@ -921,7 +928,12 @@ fn decode_win32_paste_payload(text: &str) -> Option<String> {
     }
     // Decode locally so invalid or incomplete surrogates cannot leak into the
     // next paste, and reject rather than partially replacing malformed text.
-    String::from_utf16(&units).ok()
+    let mut decoded = String::from_utf16(&units).ok()?;
+    // UTF-16 units understate the UTF-8 byte count. A few non-ASCII units
+    // near the 1 MiB limit can double String capacity; the bounded handoff
+    // must charge the retained allocation, not reject an admissible payload.
+    decoded.shrink_to_fit();
+    Some(decoded)
 }
 
 fn parse_win32_paste_record(report: &str) -> Option<WindowsKeyRecord> {
@@ -1019,6 +1031,45 @@ struct WindowsMouseButtons {
 }
 
 impl WindowsInputMapper {
+    fn translate_batch(
+        &mut self,
+        records: impl IntoIterator<Item = WindowsInputRecord>,
+    ) -> Vec<PlatformInputItem> {
+        let mut items = Vec::new();
+        let mut ascii = Vec::new();
+        for record in records {
+            let batchable = match record {
+                WindowsInputRecord::Key(key)
+                    if key.key_down
+                        && key.repeat_count == 1
+                        && key.virtual_key_code == 0
+                        && key.virtual_scan_code == 0
+                        && key.control_key_state == 0
+                        && (0x20..=0x7e).contains(&key.unicode)
+                        && self.pending_high_surrogate.is_none()
+                        && (self.win32_input.buffer.first() == Some(&0x1b)
+                            || !ascii.is_empty()) =>
+                {
+                    Some(key.unicode as u8)
+                }
+                _ => None,
+            };
+            if let Some(byte) = batchable {
+                ascii.push(byte);
+                continue;
+            }
+            if !ascii.is_empty() {
+                items.extend(self.translate_win32_input_mode_bytes(&ascii));
+                ascii.clear();
+            }
+            items.extend(self.translate(record));
+        }
+        if !ascii.is_empty() {
+            items.extend(self.translate_win32_input_mode_bytes(&ascii));
+        }
+        items
+    }
+
     fn idle(&mut self) -> Vec<PlatformInputItem> {
         self.win32_input
             .flush_timeout()
@@ -1596,22 +1647,29 @@ impl WindowsWin32InputModeFramer {
 
     fn next_item(&mut self) -> Option<WindowsWin32InputModeItem> {
         if self.buffer.is_empty() {
+            self.scan_from = 0;
             return None;
         }
 
         if self.buffer.as_slice() == b"\x1b" || self.buffer.as_slice() == b"\x1b[" {
+            self.scan_from = self.buffer.len();
             return None;
         }
 
         if self.buffer.starts_with(b"\x1b[") {
-            let mut cursor = 2;
+            let mut cursor = self.scan_from.max(2);
             while cursor < self.buffer.len()
                 && (self.buffer[cursor].is_ascii_digit() || self.buffer[cursor] == b';')
             {
+                #[cfg(test)]
+                {
+                    self.scan_steps += 1;
+                }
                 cursor += 1;
             }
 
             if cursor == self.buffer.len() {
+                self.scan_from = cursor;
                 return None;
             }
 
@@ -1625,16 +1683,19 @@ impl WindowsWin32InputModeFramer {
                     }
                 });
                 self.buffer.drain(..=cursor);
+                self.scan_from = 0;
                 return Some(item.unwrap_or(WindowsWin32InputModeItem::Bytes(bytes)));
             }
         }
 
+        self.scan_from = 0;
         Some(WindowsWin32InputModeItem::Bytes(vec![self
             .buffer
             .remove(0)]))
     }
 
     fn flush_timeout(&mut self) -> Vec<Vec<u8>> {
+        self.scan_from = 0;
         if self.buffer.is_empty() {
             Vec::new()
         } else {
@@ -2367,6 +2428,51 @@ mod tests {
         assert!(shortcut_preserved);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn m5_windows_stdin_channel_bounds_pastes_and_preserves_rejection_order() {
+        use crate::protocol::ClientInputEvent;
+
+        let (tx, mut rx) = mpsc::channel(crate::client::WINDOWS_STDIN_CHANNEL_CAPACITY);
+        let mut handoff = WindowsInputHandoff::default();
+        for index in 0..crate::client::WINDOWS_STDIN_CHANNEL_CAPACITY {
+            handoff.push(vec![ClientInputEvent::Paste {
+                text: ((b'A' + index as u8) as char)
+                    .to_string()
+                    .repeat(crate::protocol::MAX_INPUT_PAYLOAD),
+            }]);
+            assert!(handoff.try_flush(&tx));
+        }
+        handoff.push(vec![ClientInputEvent::Paste {
+            text: "x".repeat(crate::protocol::MAX_INPUT_PAYLOAD + 1),
+        }]);
+        handoff.push(vec![ClientInputEvent::TextCommit("after".into())]);
+        assert!(handoff.try_flush(&tx));
+        assert_eq!(handoff.pending.len(), 2);
+        assert!(!handoff.failed);
+
+        for index in 0..crate::client::WINDOWS_STDIN_CHANNEL_CAPACITY {
+            let ClientLoopEvent::StdinEvents(events) = rx.try_recv().unwrap() else {
+                panic!("expected admitted paste");
+            };
+            assert!(
+                matches!(events.as_slice(), [ClientInputEvent::Paste { text }]
+                if text.len() == crate::protocol::MAX_INPUT_PAYLOAD
+                    && text.as_bytes()[0] == b'A' + index as u8)
+            );
+            assert!(handoff.try_flush(&tx));
+        }
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            ClientLoopEvent::PasteRejected { .. }
+        ));
+        assert!(
+            matches!(rx.try_recv().unwrap(), ClientLoopEvent::StdinEvents(events)
+            if events == [ClientInputEvent::TextCommit("after".into())])
+        );
+        assert!(!handoff.failed);
+    }
+
     #[test]
     fn vti_bracketed_paste_records_emit_single_paste() {
         let records = "\x1b[200~alpha\rbravo\rcharlie\x1b[201~"
@@ -2379,6 +2485,58 @@ mod tests {
                 text: "alpha\rbravo\rcharlie".into(),
             }]
         );
+    }
+
+    #[test]
+    fn m5_win32_serialized_key_framer_scans_linearly() {
+        let wrapper = b"\x1b[0;0;120;1;0;1_";
+        let mut framer = WindowsWin32InputModeFramer::default();
+        let mut emitted = 0;
+        for byte in wrapper.repeat(4096) {
+            emitted += framer.push(std::slice::from_ref(&byte)).len();
+        }
+        assert_eq!(emitted, 4096);
+        assert!(
+            framer.scan_steps <= wrapper.len() * 4096,
+            "scanned {} positions for {} bytes",
+            framer.scan_steps,
+            wrapper.len() * 4096
+        );
+    }
+
+    #[test]
+    fn m5_batched_console_ascii_preserves_recordwise_input_items() {
+        let mut records: Vec<_> = "\x1b[0;0;120;1;0;1_\x1b[200~line\r\x1b[201~"
+            .chars()
+            .map(key_char)
+            .collect();
+        records.push(WindowsInputRecord::Focus(false));
+        records.extend("\x1b[0;0;121;1;0;1_".chars().map(key_char));
+        records.push(WindowsInputRecord::Key(WindowsKeyRecord {
+            key_down: true,
+            repeat_count: 1,
+            virtual_key_code: 0,
+            virtual_scan_code: 0,
+            unicode: 0xd83d,
+            control_key_state: 0,
+        }));
+        records.push(key_char('a'));
+        for width in [1, 7, 128] {
+            let mut expected = Vec::new();
+            let mut actual = Vec::new();
+            let mut recordwise = WindowsInputMapper::default();
+            let mut batched = WindowsInputMapper::default();
+            for chunk in records.chunks(width) {
+                expected.extend(
+                    chunk
+                        .iter()
+                        .copied()
+                        .flat_map(|record| recordwise.translate(record)),
+                );
+                actual.extend(batched.translate_batch(chunk.iter().copied()));
+            }
+            assert_eq!(actual, expected, "batch width {width}");
+        }
     }
 
     #[test]
@@ -2452,6 +2610,26 @@ mod tests {
         text.encode_utf16()
             .map(|unit| format!("\x1b[0;0;{unit};1;0;1_\x1b[0;0;{unit};0;0;1_"))
             .collect()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn m5_near_limit_unicode_paste_fits_bounded_handoff_after_decoding() {
+        let mut payload = "中文".to_owned();
+        payload.push_str(&"x".repeat(crate::protocol::MAX_INPUT_PAYLOAD - payload.len()));
+        let serialized = serialized_paste_text(&payload);
+        let decoded = decode_win32_paste_payload(&serialized).expect("complete key-record pairs");
+        assert_eq!(decoded, payload);
+        assert!(decoded.capacity() <= crate::protocol::MAX_INPUT_PAYLOAD);
+        let mut handoff = WindowsInputHandoff::default();
+        handoff.push(vec![crate::protocol::ClientInputEvent::Paste {
+            text: decoded,
+        }]);
+        assert!(
+            !handoff.failed,
+            "valid payload must not exhaust local memory admission"
+        );
+        assert_eq!(handoff.pending.len(), 1);
     }
 
     #[test]

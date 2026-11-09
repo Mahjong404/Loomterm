@@ -3822,6 +3822,12 @@ mod tests {
             super::prepare_paste_text_for_pty_platform("one\ntwo\r\nthree\rfour".to_owned()),
             "one\r\ntwo\r\nthree\rfour"
         );
+        let decoded = "\n".repeat(crate::protocol::MAX_INPUT_PAYLOAD);
+        assert_eq!(
+            super::prepare_paste_text_for_pty_platform(decoded).len()
+                + crate::pty::budget::PASTE_MARKER_BYTES,
+            crate::pty::budget::MAX_USER_WRITE_BYTES
+        );
     }
 
     #[test]

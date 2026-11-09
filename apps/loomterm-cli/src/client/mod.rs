@@ -80,6 +80,9 @@ use terminal_setup::{
     setup_direct_attach_terminal, setup_terminal, should_draw_host_cursor, TerminalGuard,
 };
 
+#[cfg(windows)]
+const WINDOWS_STDIN_CHANNEL_CAPACITY: usize = 16;
+
 fn refresh_host_mouse_capture(enabled: bool, sgr_pixels: bool) {
     if let Err(err) = set_mouse_capture(enabled, sgr_pixels) {
         warn!(err = %err, "failed to re-assert host mouse capture");
@@ -536,9 +539,11 @@ async fn run_client_loop(
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ClientLoopEvent>(256);
     let (supervisor_tx, mut supervisor_rx) =
         tokio::sync::mpsc::channel::<endpoint::EndpointSupervisorEvent>(64);
-    // Keep Windows console draining independent of server-frame backpressure.
+    // Keep Windows console draining independent of server-frame backpressure,
+    // but do not retain 256 admitted 1 MiB pastes while the UI is stalled.
     #[cfg(windows)]
-    let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<ClientLoopEvent>(256);
+    let (stdin_tx, mut stdin_rx) =
+        tokio::sync::mpsc::channel::<ClientLoopEvent>(WINDOWS_STDIN_CHANNEL_CAPACITY);
     #[cfg(unix)]
     let stdin_tx = event_tx.clone();
 

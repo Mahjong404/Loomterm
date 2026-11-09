@@ -206,7 +206,12 @@ impl RawInputFramer {
 fn events_from_framed_chunks(chunks: Vec<Vec<u8>>) -> Vec<RawInputEvent> {
     chunks
         .into_iter()
-        .filter_map(|chunk| {
+        .filter_map(|mut chunk| {
+            if let Some(payload_len) = complete_text_bracketed_paste(&chunk).map(str::len) {
+                chunk.drain(..BRACKETED_PASTE_START.len());
+                chunk.truncate(payload_len);
+                return String::from_utf8(chunk).ok().map(RawInputEvent::Paste);
+            }
             if chunk.as_slice() == [ESC] {
                 return Some(RawInputEvent::Key(
                     TerminalKey::new(crossterm::event::KeyCode::Esc, KeyModifiers::empty())
@@ -979,10 +984,11 @@ impl RawInputByteFramer {
                     break;
                 }
                 end.and_then(|end| {
-                    let content =
-                        std::str::from_utf8(&self.buffer[BRACKETED_PASTE_START.len()..end]).ok()?;
+                    // The event is only a tag here; the framed bytes are decoded
+                    // after extraction. Do not clone a potentially 64 MiB paste.
+                    std::str::from_utf8(&self.buffer[BRACKETED_PASTE_START.len()..end]).ok()?;
                     Some((
-                        RawInputEvent::Paste(content.to_owned()),
+                        RawInputEvent::Paste(String::new()),
                         end + BRACKETED_PASTE_END.len(),
                     ))
                 })
@@ -1017,9 +1023,18 @@ impl RawInputByteFramer {
                 self.host_reply_activity_at = Some(Instant::now());
             }
             self.held_pending_host_reply_esc = false;
-            chunks.push(self.buffer[..consumed].to_vec());
-            self.buffer.drain(..consumed);
-            if matches!(event, RawInputEvent::Paste(_)) {
+            let completed_paste = matches!(event, RawInputEvent::Paste(_));
+            if completed_paste {
+                // Transfer the large allocation to the completed chunk and
+                // leave only any following input in the framer.
+                let mut completed = std::mem::take(&mut self.buffer);
+                self.buffer = completed.split_off(consumed);
+                chunks.push(completed);
+            } else {
+                chunks.push(self.buffer[..consumed].to_vec());
+                self.buffer.drain(..consumed);
+            }
+            if completed_paste {
                 self.bracketed_paste_scan_from = BRACKETED_PASTE_START.len();
                 self.bracketed_paste_end = None;
                 #[cfg(windows)]
@@ -2947,6 +2962,42 @@ mod tests {
             panic!("expected paste");
         };
         assert_eq!(text, "hello");
+    }
+
+    #[test]
+    fn m5_completed_paste_transfers_allocation_and_releases_framer_capacity() {
+        let mut framer = RawInputByteFramer::default();
+        assert!(framer.push(BRACKETED_PASTE_START).is_empty());
+        assert!(framer.push(&vec![b'x'; 256 * 1024]).is_empty());
+        framer
+            .buffer
+            .reserve(BRACKETED_PASTE_END.len() + b"after".len());
+        let buffered = framer.buffer.as_ptr();
+        assert!(framer.buffer.capacity() >= 256 * 1024);
+
+        let mut final_read = BRACKETED_PASTE_END.to_vec();
+        final_read.extend_from_slice(b"after");
+        let chunks = framer.push(&final_read);
+        assert_eq!(chunks[0].as_ptr(), buffered);
+        assert_eq!(chunks[0].len(), 256 * 1024 + 12);
+        assert_eq!(chunks.concat().len(), 256 * 1024 + 12 + 5);
+        assert!(framer.buffer.capacity() < 1024);
+    }
+
+    #[test]
+    fn m5_completed_paste_decoding_reuses_framed_bytes() {
+        let payload = "界😀\n".repeat(32 * 1024);
+        let mut chunk = BRACKETED_PASTE_START.to_vec();
+        chunk.extend_from_slice(payload.as_bytes());
+        chunk.extend_from_slice(BRACKETED_PASTE_END);
+        let owned = chunk.as_ptr();
+
+        let events = events_from_framed_chunks(vec![chunk]);
+        let [RawInputEvent::Paste(text)] = events.as_slice() else {
+            panic!("expected one paste");
+        };
+        assert_eq!(text, &payload);
+        assert_eq!(text.as_ptr(), owned);
     }
 
     #[test]
