@@ -1,0 +1,76 @@
+# Source-level Window checks. Native GUI, physical input, ConPTY and GPU
+# acceptance require the separate controlled Windows fixture.
+name: Loomterm Window source
+on:
+  pull_request:
+    branches: [main, codex/m2-native]
+    paths:
+      - '.github/workflows/window-native.yml'
+      - 'apps/loomterm-window/**'
+      - 'tools/prepare-window-host.py'
+      - 'tools/stage-window-conpty.py'
+      - 'tools/fixtures/test_window_*.py'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/window-native.yml'
+      - 'apps/loomterm-window/**'
+      - 'tools/prepare-window-host.py'
+      - 'tools/stage-window-conpty.py'
+      - 'tools/fixtures/test_window_*.py'
+permissions:
+  contents: read
+jobs:
+  window-source:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Check fixed source and legal inventory
+        shell: pwsh
+        run: |
+          @'
+          import json
+          from pathlib import Path
+          root = Path('apps/loomterm-window')
+          host = json.loads((root / 'UPSTREAM.json').read_text(encoding='utf-8'))
+          conpty = json.loads((root / 'conpty.json').read_text(encoding='utf-8'))
+          assert host['revision'] == 'e2a98e1b8af156988ad0ac778658ac27b60a55fb'
+          assert host['license'] == 'MIT'
+          assert conpty['package']['version'] == '1.24.260710001'
+          assert conpty['package']['sha256'] == '9382ad7becb7e4d84e300578d8e4f4df28f43d979d9055d978c42913c47e0e9d'
+          assert conpty['package']['license'] == 'MIT'
+          assert len(conpty['notices']) == 2
+          assert all(len(item['sha256']) == 64 for item in conpty['bundles']['x86_64']['files'])
+          assert all((root / ('patches/000' + str(index) + '-' + name + '.patch')).is_file()
+                     for index, name in ((1, 'host-adapter'), (2, 'windows-utf16-input'),
+                                         (3, 'win32-utf16-records')))
+          assert Path('LICENSE').is_file()
+          print('Fixed host/ConPTY source and legal inventory present')
+          '@ | python -B -
+      - name: Install pinned Rust components
+        shell: pwsh
+        run: rustup toolchain install 1.96.1-x86_64-pc-windows-msvc --profile minimal --component rustfmt --component clippy
+      - name: Check Window crate
+        shell: pwsh
+        working-directory: apps/loomterm-window
+        run: |
+          cargo +1.96.1-x86_64-pc-windows-msvc metadata --locked --no-deps --format-version 1 | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.96.1-x86_64-pc-windows-msvc fmt --all -- --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.96.1-x86_64-pc-windows-msvc check --locked --all-targets
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.96.1-x86_64-pc-windows-msvc test --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.96.1-x86_64-pc-windows-msvc clippy --locked --all-targets -- -D warnings
+          exit $LASTEXITCODE
+      - name: Check Window staging fixtures
+        shell: pwsh
+        run: |
+          python -B -m unittest discover -s tools/fixtures -p 'test_window_*.py' -v
+          exit $LASTEXITCODE
+      # This workflow neither downloads/builds WezTerm nor stages the ConPTY
+      # package. It makes no physical-device, visual or installer claim.

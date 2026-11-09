@@ -16,7 +16,7 @@ passed. The host maps Reader Core PaintStyle to bounded GDI font/color/surface
 roles; Tab/Shift+Tab focuses links without opening external targets. Fixed 7e11
 native style and image HWND cases pass; a private-cache ownership test proves
 one Reader close does not clear another Reader's decoded pixels. Formula
-resources, search UI, physical-device wheel, exact selection and terminal GPU
+resources, physical-device wheel, exact selection/copy and terminal GPU
 release remain unaccepted. Formal M3 Gate is still Pending.
 
 The adapter targets the fixed revision in [UPSTREAM.json](UPSTREAM.json).
@@ -55,10 +55,10 @@ Windows character decoding, and Win32 UTF-16 serialization. The latter's unit
 test and real outer-PTY byte capture pass. BMP/combining WM_CHAR reaches the
 work process. With M2's separately owned input-state fix, supplementary input
 also reaches an actual PowerShell string as exact UTF-8. The original fixed
-M2 binary still drops it. The M2 owner has since published its input fix in a
-later M2 branch commit, but this Window branch remains on its fixed older base.
-M3 has staged and GUI-tested M2-owned CLI candidates, not a published Window
-branch dependency. A later focused physical test on the exact M5 CLI candidate
+M2 binary still drops it. The M3 Draft PR now integrates the fixed M2
+`9d97c1673cc54aac499d5f7680e8467d7ffb197f` base. M5-owned input
+and viewport changes remain a separately tested source dependency, not part
+of the published Window branch. A later focused physical test on the exact M5 CLI candidate
 below delivered Shift+X, Ctrl+K, Alt+X and F6 through the actual Window to the
 raw work process as `58 0b 1b 78 1b 5b 31 37 7e`, with the same Shell retained.
 This supersedes earlier failed/foreground-skipped chord probes for that limited
@@ -66,11 +66,12 @@ sequence. Arrow/navigation keys, other function keys, physical mouse input and
 raw-console non-BMP `ReadFile` remain separate; the latter still yields four
 replacement characters at input CP 65001 and mode 0x280. This is not complete
 native Unicode acceptance.
-Window-crate metadata, fmt, all-target check, six Cargo tests and strict
+Window-crate metadata, fmt, all-target check, 15 Cargo tests and strict
 all-target Clippy pass on fixed Rust 1.96.1 MSVC using the existing offline
 dependency/toolchain cache and an isolated Window target directory.
 This supersedes the earlier default-cache sha2 resolution failure and
-direct-only quality scope. The Window Python suite passes 9/9.
+direct-only quality scope. The Window Python suite passes nine tests with the
+fixed-package case skipped when no package is supplied.
 The extracted exact UTF-16 decoder and host input-types tests also passed.
 
 ## App-local ConPTY staging
@@ -162,3 +163,26 @@ patch and no second document parser or working Terminal owner. Fixed Rust
 1.96.1 Window tests, check, strict Clippy and build passed. A real HWND test
 located and highlighted one synthetic source match via posted Win32 events;
 foreground SendInput was blocked, so physical search input remains Pending.
+
+## Current Window-owned input seams and outer ConPTY boundary
+
+The Reader HWND handles WM_MOUSEHWHEEL and Shift+WM_MOUSEWHEEL with separate
+partial-delta accumulators and forwards signed columns to Reader Core. It
+also accepts standard WM_COPY for its existing selection. These are Window
+source changes, not a fourth WezTerm adapter patch or a second Reader model.
+Rust 1.96.1 MSVC fmt/check/15 tests/strict Clippy pass. Posted HWND wheel
+behavior passes; physical-device input and exact Reader Clipboard copy remain
+Pending. A newer Reader Core precision API was exercised in a separate local
+source copy but is not yet the public Cargo pin.
+
+The CLI's app-local ConPTY 1.24 bundle preserves inner Kitty APC. The outer
+WezTerm host retains ConPTY 1.22. With only the outer DLL pair changed, a
+301-byte paste reaches the shared TUI as a 301-byte Paste event and the
+work child as 314 bytes under 1.22. Outer 1.24 instead emits a mixed input
+record stream: one LF is represented by four 66-byte Ctrl/Enter key records,
+the old decoder leaves them opaque, and the work child receives 313 bytes.
+The 1,048,608-byte overlimit run rejects exactly that size and recovers with
+an exact 301-byte follow-up under 1.22; 1.24 counts 1,048,673 and the
+follow-up is 300 bytes. This is a decoder/outer-input compatibility gap,
+not evidence that inner image transport is broken. No default switch or
+host source patch is made; M5 owns shared decoder semantics.

@@ -4,15 +4,12 @@
 terminal TUI in a dedicated native Windows host and connects to the same
 Loomterm Daemon as Loomterm CLI. It adds no Workspace or work-terminal owner.
 
-This branch depends on M2 commit `56b0ae5f7b0c2e6a1c9fcc30dc313bbcabc0022b`.
-The M2 branch has since advanced to `9d97c1673cc54aac499d5f7680e8467d7ffb197f`;
-this Window branch has not been rebased on that commit. A separate M2-owned
-CLI candidate was tested inside the staged Window, but that does not update the
-branch dependency or certify a build from the latest M2 HEAD.
-The early Linux/macOS M2 native gate passed on 2026-11-08. This Window branch
-still depends on its older fixed M2 commit, so it does not inherit that later
-source or prove a rebuild against it. Publication is for source review, not
-an installer, release, or claim that native GUI acceptance is complete.
+The M3 Draft PR integrates M2 commit `9d97c1673cc54aac499d5f7680e8467d7ffb197f`.
+Its shared-client M5 source remains a separate dependency under review; a
+fixed-SHA, isolated M3+M5 source overlay passed scoped Windows checks and
+native Window lifecycle tests, without changing this PR's source ancestry.
+Publication is for source review, not an installer, release, or claim that
+native GUI acceptance is complete.
 
 ## Fixed inputs and prerequisites
 
@@ -114,10 +111,30 @@ Run these from the pinned Rust 1.96.1 workspace and set
 `WINDOW_CONPTY_PACKAGE` to the verified fixed package before the Python suite
 to exercise its real staging case. With the existing fixed offline cache and
 an isolated Window target directory, Cargo metadata, fmt, all-target check,
-six crate tests and all-target Clippy with `-D warnings` pass on Rust 1.96.1
-MSVC. The Python suite passes 9/9, including the real fixed-package case.
+15 crate tests and all-target Clippy with `-D warnings` pass on Rust 1.96.1
+MSVC in the isolated M3 source tree. The Python suite passes 9 tests and
+skips the real-package case when no fixed package is supplied; with that
+package, the staging case is exercised. The Reader wheel test checks Win32
+message routing, not physical-device input.
 The earlier default-cache `sha2` resolution failure is retained as an
 environment result; it is no longer the current Window Cargo check result.
+
+The [Window source workflow](../../.github/workflows/window-native.yml) uses
+one Windows 2022 runner for fixed source/legal inventory, Rust 1.96.1
+metadata, fmt, check, tests, strict Clippy and synthetic staging fixtures.
+It does not build the separate WezTerm host, download the ConPTY package or
+claim native GUI/IME/physical-wheel acceptance. A local pass is not a remote
+CI result; check the workflow run on the exact PR HEAD.
+
+The fixed ConPTY 1.24 bundle staged beside the CLI serves the **inner** work
+terminal image path. The **outer** WezTerm host retains its fixed ConPTY 1.22
+input path. In the native paste A/B, using 1.24 outside changed the input
+record representation and lost LF before the shared client decoder; its
+301-byte paste yielded 313 work-child bytes instead of the required 314.
+The faster outer 1.24 candidate is therefore not the product default.
+Reader HWND supports posted horizontal-wheel and Shift+vertical-wheel routing
+plus standard WM_COPY to its existing private selection. Physical wheel and
+exact Reader Clipboard copy still require native acceptance.
 
 The native fixture uses Python 3.12+ and Pillow for optional bitmap captures.
 Build a bounded query child and run the exact-PID Windows fixture:
@@ -183,7 +200,7 @@ the same working Shell. Two Windows each render the image; closing A leaves
 B's image and Shell intact, and Delete clears B's image. Wheel events target
 the owned HWND and Pane; these results do not certify physical mouse behavior
 or every cursor/selection layout. The candidate binary is not published here,
-and this Window branch has not merged or rebased onto the M2/M5 source.
+and this Window branch has not incorporated the M5 source.
 
 With the preceding M5 candidate e3759e37, replaying serialized Win32 records through the
 outer PTY reaches the raw work process for ASCII, Shift, Ctrl, Alt, F6 and

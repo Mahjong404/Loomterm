@@ -30,6 +30,11 @@ const MARGIN: i32 = 12;
 const CLASS: &str = "LoomtermReaderDocumentV1";
 const IMAGE_CACHE_BYTES: usize = 16 * 1024 * 1024;
 const IMAGE_QUEUE_LEN: usize = 16;
+const HORIZONTAL_COLUMNS_PER_NOTCH: i32 = 3;
+// Win32 MK_SHIFT in the low word of WM_MOUSEWHEEL/WM_MOUSEHWHEEL wParam.
+const MOUSE_SHIFT: usize = 0x0004;
+// Standard Win32 WM_COPY, useful for an active Reader selection.
+const READER_WM_COPY: u32 = 0x0301;
 const SEARCH_MAX_BYTES: usize = 256;
 const SEARCH_MAX_HITS: usize = 128;
 const FONT_VARIANTS: usize = 16;
@@ -65,6 +70,37 @@ fn text_color(style: &PaintStyle) -> u32 {
 
 fn fits_image_cache(used: usize, incoming: usize) -> bool {
     incoming <= IMAGE_CACHE_BYTES.saturating_sub(used)
+}
+
+fn wheel_input(
+    wparam: WPARAM,
+    horizontal_message: bool,
+    vertical_remainder: &mut i32,
+    horizontal_remainder: &mut i32,
+) -> Option<Input> {
+    let shift = (wparam & MOUSE_SHIFT) != 0;
+    let horizontal = horizontal_message || shift;
+    let remainder = if horizontal {
+        horizontal_remainder
+    } else {
+        vertical_remainder
+    };
+    *remainder += ((wparam >> 16) as i16) as i32;
+    let notches = *remainder / 120;
+    *remainder %= 120;
+    if notches == 0 {
+        return None;
+    }
+    if horizontal {
+        let direction = if horizontal_message { 1 } else { -1 };
+        Some(Input::Horizontal(
+            notches * direction * HORIZONTAL_COLUMNS_PER_NOTCH,
+        ))
+    } else {
+        Some(Input::Wheel(
+            notches.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+        ))
+    }
 }
 
 struct ImageRequest {
@@ -161,6 +197,7 @@ struct State {
     row_height: i32,
     margin: i32,
     wheel_remainder: i32,
+    horizontal_wheel_remainder: i32,
     selection_start: Option<usize>,
     pending_frame: bool,
     released: bool,
@@ -193,6 +230,7 @@ impl State {
             row_height: 19,
             margin: MARGIN,
             wheel_remainder: 0,
+            horizontal_wheel_remainder: 0,
             selection_start: None,
             pending_frame: false,
             released: false,
@@ -900,16 +938,15 @@ impl State {
         }
     }
 
-    unsafe fn wheel(&mut self, hwnd: HWND, wparam: WPARAM) {
-        self.wheel_remainder += ((wparam >> 16) as i16) as i32;
-        let notches = self.wheel_remainder / 120;
-        self.wheel_remainder %= 120;
-        if notches != 0 {
+    unsafe fn wheel(&mut self, hwnd: HWND, wparam: WPARAM, horizontal_message: bool) {
+        if let Some(input) = wheel_input(
+            wparam,
+            horizontal_message,
+            &mut self.wheel_remainder,
+            &mut self.horizontal_wheel_remainder,
+        ) {
             unsafe {
-                self.input(
-                    hwnd,
-                    Input::Wheel(notches.clamp(i16::MIN as i32, i16::MAX as i32) as i16),
-                );
+                self.input(hwnd, input);
             }
         }
     }
@@ -1045,7 +1082,13 @@ unsafe extern "system" fn window_proc(
         }
         WM_MOUSEWHEEL => {
             unsafe {
-                state.wheel(hwnd, wparam);
+                state.wheel(hwnd, wparam, false);
+            }
+            0
+        }
+        WM_MOUSEHWHEEL => {
+            unsafe {
+                state.wheel(hwnd, wparam, true);
             }
             0
         }
@@ -1069,6 +1112,12 @@ unsafe extern "system" fn window_proc(
                 ReleaseCapture();
             }
             state.selection_start = None;
+            0
+        }
+        READER_WM_COPY => {
+            unsafe {
+                state.copy_selection(hwnd);
+            }
             0
         }
         WM_KEYDOWN => {
@@ -1224,6 +1273,42 @@ mod tests {
         fs,
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn native_wheel_axes_keep_partial_deltas_separate() {
+        let report = |delta: i16, keys: usize| ((delta as u16 as usize) << 16) | keys;
+        let mut vertical = 0;
+        let mut horizontal = 0;
+        assert!(wheel_input(report(60, 0), false, &mut vertical, &mut horizontal).is_none());
+        assert!(wheel_input(
+            report(60, MOUSE_SHIFT),
+            false,
+            &mut vertical,
+            &mut horizontal,
+        )
+        .is_none());
+        assert!(matches!(
+            wheel_input(report(60, 0), false, &mut vertical, &mut horizontal),
+            Some(Input::Wheel(1))
+        ));
+        assert!(matches!(
+            wheel_input(
+                report(60, MOUSE_SHIFT),
+                false,
+                &mut vertical,
+                &mut horizontal,
+            ),
+            Some(Input::Horizontal(-3))
+        ));
+        assert!(matches!(
+            wheel_input(report(120, 0), true, &mut vertical, &mut horizontal),
+            Some(Input::Horizontal(3))
+        ));
+        assert!(matches!(
+            wheel_input(report(-120, 0), true, &mut vertical, &mut horizontal),
+            Some(Input::Horizontal(-3))
+        ));
+    }
 
     #[test]
     fn reader_paint_flags_map_to_bounded_font_and_color_roles() {
