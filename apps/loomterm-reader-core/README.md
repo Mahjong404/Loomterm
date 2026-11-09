@@ -336,8 +336,10 @@ through one cancellable search worker, limiting native queries to 256 UTF-8
 bytes and results to 128. Its posted-message HWND fixture passed UTF-16 text
 input, F3/Enter navigation, current-hit highlighting (1,981 highlight pixels),
 and Reader close without terminating the same Shell (GDI objects 31 to 15).
-The fixture ran in an isolated M3 worktree; publication in M3 Draft PR #1
-must be verified separately. Physical foreground Ctrl+F input and broader
+The final posted-message rerun also cleared the old hit highlight after F5
+(zero old-highlight pixels). M3 published the four Window-owned search files
+in Draft PR #1 at `8e0cfeb5be8dace89e8883fdefd08a0be7664354`, still pinned
+to fixed Reader `7e11dcca…`. Physical foreground Ctrl+F input and broader
 search/selection acceptance remain Pending; posted messages do not certify
 physical keyboard input.
 
