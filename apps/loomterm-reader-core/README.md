@@ -1,10 +1,11 @@
 # Loomterm Reader Core
 
 M4-A supplies bounded local Markdown content; M4-B adds logical document layout,
-a private viewport, navigation and a tested Mock Host adapter. This independent
-library workspace is **not wired into the CLI or Window host**. It produces draw
-data without a GPU, terminal renderer or working Terminal Owner. The full M4
-visual and window lifecycle gates remain Pending.
+a private viewport, navigation and a tested Mock Host adapter. The separate M3
+Window branch consumes a fixed revision for an experimental native plain-text
+Reader surface; this library itself owns no native window. It produces draw data
+without a GPU, terminal renderer or working Terminal Owner. Semantic styling,
+image/math drawing and the full M4 visual/lifecycle gates remain Pending.
 
 The crate directory is the Reader physical development/build boundary. Its own
 manifest, lockfile, source, tests and output do not change either concurrent
@@ -304,8 +305,9 @@ The small adapter contract is `ReaderView::{open,refresh,poll,apply,resize,frame
 input,resource_size,resource_failed,cancel,close}`, plus `source_state`, `error`,
 `Frame::budget` and `is_current_frame`. The lower-level content API remains
 available independently. No GUI or serialization dependency is required. M3's
-owner must coordinate a future path dependency and shared manifest/lockfile
-change; this workspace makes no such change.
+owner pins a Reader revision in its own host workspace; final shared dependency
+and lockfile integration still requires owner coordination. This workspace makes
+no host manifest change.
 
 M3 must provide the following before real M4-C acceptance:
 
