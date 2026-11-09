@@ -9,7 +9,7 @@ use std::{
     ops::Range,
     sync::Arc,
 };
-use unicode_segmentation::UnicodeSegmentation;
+use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 
 struct Cached {
     page: Arc<Page>,
@@ -602,7 +602,10 @@ impl ViewState {
                 let source = &self.projection.document.content.source;
                 let valid = |offset| {
                     offset == source.len()
-                        || source.grapheme_indices(true).any(|(i, _)| i == offset)
+                        || (source.is_char_boundary(offset)
+                            && GraphemeCursor::new(offset, source.len(), true)
+                                .is_boundary(source, 0)
+                                == Ok(true))
                 };
                 if start > source.len() || end > source.len() || !valid(start) || !valid(end) {
                     return Err(ViewError::InvalidPosition);

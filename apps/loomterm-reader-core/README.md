@@ -203,6 +203,12 @@ for entities, generated markers, normalized text and placeholders. Node IDs,
 block indices, selection and search hits belong to a projection revision.
 `Frame::text` accepts clusters from that same frame. `Frame::hit_test` includes
 the interior of a wide grapheme and returns no hit outside the viewport.
+For native drag selection, `Frame::source_point(column, row)` clamps margins and
+blank rows to visible text and chooses a grapheme's source start/end by its
+logical half-cell. Its `exact` flag distinguishes direct source text from
+generated markers. `Frame::is_selected(cluster)` reports source-byte overlap for
+painting. The host must check `is_current_frame` before using pointer results;
+pixel-to-column conversion remains the host's font/DPI responsibility.
 
 ## Bound layout and keep a reading position
 
@@ -265,7 +271,9 @@ Pixel-perfect anchoring across font/shape changes is not claimed.
 zero-based heading navigation, link focus/activation and source-byte selection.
 The host maps physical keys/mouse to these intents. `Frame` includes selection
 and focused-link identity for painting. `selection()` returns original Markdown,
-bounded at grapheme boundaries; formatted text copying is not implemented.
+bounded at grapheme boundaries; selection endpoint validation checks the supplied
+offset without scanning from the source start on every drag event. Formatted
+text copying is not implemented.
 
 `Projection::search(query, max, cancel)` searches literal, case-sensitive
 projected text within individual blocks, with a 256-byte query and at most

@@ -670,3 +670,96 @@ fn host_gets_semantic_grapheme_layout_without_a_terminal_renderer() {
         .flat_map(|line| &line.clusters)
         .all(|c| c.width <= 2));
 }
+
+#[test]
+fn pointer_selection_maps_visible_graphemes_and_marks_painted_clusters() {
+    let mut host = MockHost::open("# 标题\n\nA中👩‍💻B\n", 20, 8);
+    let frame = host.frame();
+    let line = frame
+        .lines
+        .iter()
+        .find(|line| {
+            line.clusters
+                .iter()
+                .any(|cluster| frame.text(cluster) == "中")
+        })
+        .unwrap();
+    let wide = line
+        .clusters
+        .iter()
+        .find(|cluster| frame.text(cluster) == "中")
+        .unwrap();
+    assert_eq!(wide.width, 2);
+    let left = frame.source_point(wide.x as u16, line.y as u16).unwrap();
+    let right = frame
+        .source_point((wide.x + 1) as u16, line.y as u16)
+        .unwrap();
+    assert_eq!(left.byte, wide.source.bytes.start);
+    assert_eq!(right.byte, wide.source.bytes.end);
+    assert!(left.exact && right.exact);
+
+    host.view
+        .input(
+            Input::Select {
+                start: left.byte,
+                end: right.byte,
+            },
+            &Cancellation::default(),
+        )
+        .unwrap();
+    let selected = host.frame();
+    let selected_wide = selected
+        .lines
+        .iter()
+        .flat_map(|line| &line.clusters)
+        .find(|cluster| selected.text(cluster) == "中")
+        .unwrap();
+    assert!(selected.is_selected(selected_wide));
+    assert!(selected
+        .lines
+        .iter()
+        .flat_map(|line| &line.clusters)
+        .filter(|cluster| selected.text(cluster) != "中")
+        .all(|cluster| !selected.is_selected(cluster)));
+    assert_eq!(host.view.selection(), Some("中"));
+    let source = &selected.projection.document.content.source;
+    let emoji = source.find("👩‍💻").unwrap();
+    assert!(matches!(
+        host.view.input(
+            Input::Select {
+                start: emoji,
+                end: emoji + "👩".len(),
+            },
+            &Cancellation::default(),
+        ),
+        Err(ViewError::InvalidPosition)
+    ));
+    assert_eq!(host.view.selection(), Some("中"));
+}
+
+#[test]
+fn pointer_edges_clamp_to_visible_source_without_reparsing() {
+    let mut host = MockHost::open("left 世界 right\n\nsecond\n", 18, 8);
+    let frame = host.frame();
+    let first = frame
+        .lines
+        .iter()
+        .find(|line| !line.clusters.is_empty())
+        .unwrap();
+    let last = frame
+        .lines
+        .iter()
+        .rfind(|line| !line.clusters.is_empty())
+        .unwrap();
+    let before = frame.source_point(0, 0).unwrap();
+    let after = frame
+        .source_point(frame.viewport.columns - 1, frame.viewport.rows - 1)
+        .unwrap();
+    assert_eq!(
+        before.byte,
+        first.clusters.first().unwrap().source.bytes.start
+    );
+    assert_eq!(after.byte, last.clusters.last().unwrap().source.bytes.end);
+    assert!(frame.source_point(frame.viewport.columns, 0).is_none());
+    assert!(frame.source_point(0, frame.viewport.rows).is_none());
+}

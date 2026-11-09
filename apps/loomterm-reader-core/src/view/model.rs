@@ -279,6 +279,13 @@ pub struct SourceAnchor {
     pub byte: usize,
     pub precision: Precision,
 }
+/// A pointer-derived source boundary. Inexact locations come from synthesized
+/// display text; callers may use them for approximate navigation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourcePoint {
+    pub byte: usize,
+    pub exact: bool,
+}
 #[derive(Clone, Debug, Default)]
 pub struct BudgetState {
     pub blocks: usize,
@@ -320,6 +327,69 @@ impl Frame {
             .clusters
             .iter()
             .find(|c| c.x <= i32::from(column) && c.x + c.width as i32 > i32::from(column))
+    }
+
+    /// Maps a pointer cell to the nearest visible source boundary for drag
+    /// selection. Blank rows and horizontal margins clamp to visible text.
+    /// The Window adapter converts pixels using its current font/DPI metrics.
+    pub fn source_point(&self, column: u16, row: u16) -> Option<SourcePoint> {
+        if column >= self.viewport.columns || row >= self.viewport.rows {
+            return None;
+        }
+        let y = i32::from(row);
+        let line = self
+            .lines
+            .iter()
+            .filter(|line| !line.clusters.is_empty())
+            .min_by_key(|line| {
+                if y < line.y {
+                    line.y - y
+                } else {
+                    (y - (line.y + i32::from(line.height) - 1)).max(0)
+                }
+            })?;
+        let x = i32::from(column);
+        let mut previous: Option<&DrawCluster> = None;
+        for cluster in &line.clusters {
+            if x < cluster.x {
+                return Some(match previous {
+                    Some(previous) if x - (previous.x + previous.width as i32) < cluster.x - x => {
+                        SourcePoint {
+                            byte: previous.source.bytes.end,
+                            exact: previous.source.exact,
+                        }
+                    }
+                    _ => SourcePoint {
+                        byte: cluster.source.bytes.start,
+                        exact: cluster.source.exact,
+                    },
+                });
+            }
+            if x < cluster.x + cluster.width as i32 {
+                let at_end = (x - cluster.x) as u32 * 2 >= cluster.width;
+                return Some(SourcePoint {
+                    byte: if at_end {
+                        cluster.source.bytes.end
+                    } else {
+                        cluster.source.bytes.start
+                    },
+                    exact: cluster.source.exact,
+                });
+            }
+            previous = Some(cluster);
+        }
+        previous.map(|cluster| SourcePoint {
+            byte: cluster.source.bytes.end,
+            exact: cluster.source.exact,
+        })
+    }
+
+    /// Whether the source bytes represented by this visible cluster overlap
+    /// the current Reader-only selection.
+    pub fn is_selected(&self, cluster: &DrawCluster) -> bool {
+        self.selection.as_ref().is_some_and(|selection| {
+            selection.start < cluster.source.bytes.end && cluster.source.bytes.start < selection.end
+        })
     }
 }
 
