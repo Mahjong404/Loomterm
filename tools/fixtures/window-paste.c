@@ -3,12 +3,14 @@
 #define WIN32_LEAN_AND_MEAN
 #define _WIN32_WINNT 0x0A00
 #include <windows.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
-#define MAX_BYTES (256u * 1024u)
-#define TIMEOUT_MS 15000u
+#define MAX_BYTES (2u * 1024u * 1024u)
+static DWORD timeout_ms = 15000u;
 
 static HANDLE main_thread;
 static HANDLE done;
@@ -16,7 +18,7 @@ static volatile LONG expired;
 
 static DWORD WINAPI watchdog(LPVOID unused) {
     (void)unused;
-    if (WaitForSingleObject(done, TIMEOUT_MS) == WAIT_TIMEOUT) {
+    if (WaitForSingleObject(done, timeout_ms) == WAIT_TIMEOUT) {
         InterlockedExchange(&expired, 1);
         CancelSynchronousIo(main_thread);
     }
@@ -25,8 +27,23 @@ static DWORD WINAPI watchdog(LPVOID unused) {
 
 int main(int argc, char **argv) {
     const char *alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    if (argc != 2 || strlen(argv[1]) < 8 || strlen(argv[1]) > 32 ||
+    unsigned long max_bytes = MAX_BYTES;
+    unsigned long timeout_seconds = 15;
+    if (argc < 2 || argc > 4 || strlen(argv[1]) < 8 || strlen(argv[1]) > 32 ||
         strspn(argv[1], alphabet) != strlen(argv[1])) return 64;
+    if (argc >= 3) {
+        char *end = NULL;
+        errno = 0;
+        max_bytes = strtoul(argv[2], &end, 10);
+        if (errno || !end || *end || max_bytes < 1 || max_bytes > MAX_BYTES) return 64;
+    }
+    if (argc == 4) {
+        char *end = NULL;
+        errno = 0;
+        timeout_seconds = strtoul(argv[3], &end, 10);
+        if (errno || !end || *end || timeout_seconds < 5 || timeout_seconds > 240) return 64;
+    }
+    timeout_ms = (DWORD)(timeout_seconds * 1000);
     HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
     HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
     DWORD saved_input, saved_output;
@@ -53,7 +70,7 @@ int main(int argc, char **argv) {
     unsigned char chunk[4096];
     int result = 69;
     DWORD read_error = 0;
-    while (!expired && count < MAX_BYTES) {
+    while (!expired && count < max_bytes) {
         DWORD read = 0;
         if (!ReadFile(input, chunk, sizeof(chunk), &read, NULL)) {
             read_error = GetLastError();
@@ -79,7 +96,7 @@ int main(int argc, char **argv) {
                 result = 0;
                 break;
             }
-            if (count == MAX_BYTES) { result = 70; break; }
+            if (count == max_bytes) { result = 70; break; }
         }
         if (result == 0 || result == 70) break;
     }

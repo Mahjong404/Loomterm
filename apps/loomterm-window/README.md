@@ -114,7 +114,7 @@ Run these from the pinned Rust 1.96.1 workspace and set
 `WINDOW_CONPTY_PACKAGE` to the verified fixed package before the Python suite
 to exercise its real staging case. With the existing fixed offline cache and
 an isolated Window target directory, Cargo metadata, fmt, all-target check,
-four crate tests and all-target Clippy with `-D warnings` pass on Rust 1.96.1
+six crate tests and all-target Clippy with `-D warnings` pass on Rust 1.96.1
 MSVC. The Python suite passes 9/9, including the real fixed-package case.
 The earlier default-cache `sha2` resolution failure is retained as an
 environment result; it is no longer the current Window Cargo check result.
@@ -150,7 +150,7 @@ its output does not establish candidate-window or font correctness.
 | Client reading isolation with the M5 dependency candidate | Native two-Window Resize/return-tail and subsequent live output, actual CLI/Window mixed reading and 16 KiB history eviction pass on the exact candidate below. Synthetic wheel events target the owned HWND; physical wheel/selection remain Pending. This Window branch has not integrated M5 source |
 | Actual bitmap capture | Available through Win32 PrintWindow; not a blanket visual Pass |
 | Repeated-resize visual stability | Five native sizes retain the long prompt in inner/outer text; inspected candidate screenshots show no obvious residual. Prior residual is retained; wider visual/cursor acceptance remains Pending |
-| Native keyboard and raw-console compatibility | With M2 candidate 463df14d in a real Window, ASCII and Alt+x reached the raw work process; CJK passed in one run but not another, while Shift+x, Ctrl+K, F6 and supplementary Emoji did not pass that raw-reader matrix. The maintainer saw and focused one test window; a later trace window was not seen, so exact host/TUI key-loss attribution is Pending. The host disables default key bindings except Clipboard shortcuts. A separate PowerShell string path preserves WM_CHAR Emoji; inner ConPTY raw ReadFile still produces four replacement characters at input CP 65001/mode 0x280. These scopes are distinct |
+| Native keyboard and raw-console compatibility | On the exact M5 CLI candidate below, a maintainer physically entered Shift+X, Ctrl+K, Alt+X and F6 through the focused Window; the raw work process received `58 0b 1b 78 1b 5b 31 37 7e`, and the same Shell remained attached. Host/TUI key tracing is opt-in. This passes only that chord sequence; arrows, Home/End, PageUp/PageDown, other function keys and physical mouse input remain Pending. The separate raw-console non-BMP ReadFile fixture still yields four replacement characters at input CP 65001/mode 0x280; PowerShell WM_CHAR Unicode and manual IME/glyph acceptance are separate paths |
 | IME, OS Clipboard and mouse titlebar close | Maintainer reports preedit/candidates, Esc cancel, Chinese commit, Shift-drag selection, Ctrl+Shift+C/V copy/paste, and titlebar X normal in the fixed local candidate. Same Shell reattach after X is verified. Real-Window bracketed paste passes exact markers/digest through 2,261 bytes but becomes slow with size; 4,501 bytes did not reach the raw work process within 15 seconds. Cancel/disconnect and physical mouse-wheel/selection remain open |
 | CJK/emoji/combining/wide-cell rendering | CJK, combining text, Emoji and ZWJ are visible; engine cell-width probes pass. Maintainer confirms CJK/Emoji glyphs in the manual case. Multi-font/DPI and full cursor/layout acceptance remain incomplete |
 | Kitty PNG across both terminal layers | Fixed Microsoft ConPTY 1.24.260710001 preserves the exact APC. The 32x32 checker displays, resizes, scrolls out, redraws, replaces at the same ID/position and repeats; truncated replacement and a decoded image above 64 MiB do not draw. Two Windows each render it; closing one leaves the other and its Shell intact. Five further display/delete cycles kept host handles at 1,040–1,043 after initial allocation and backend handles at 188 in one run; these process-level samples do not count image/GPU resources or prove reclamation. Visible error feedback and exact resource reclamation remain Pending |
@@ -214,7 +214,43 @@ exact bottleneck and layer remain under M2-owned CLI diagnosis. Cancelled/discon
 pastes remain Pending.
 The preceding M5 candidate e3759e37 repeats the 4,501-byte failure (zero raw-reader bytes
 before the watchdog), while a 301-byte control passes exact delimiters and
-digest in 0.375 seconds. The scroll repair does not resolve this input defect.
+digest in 0.375 seconds. The newer M5 commit ee75bec4 was separately staged
+with exact CLI SHA-256 1bdef492e5a0b900718693ffdf2e123baa35a4244d5dc2f99bdde9920c64945.
+In a real Window with a prestarted Daemon under the same isolated Product Root,
+301, 4,501, 16,379, 29,771 and 262,521 wire bytes reached a raw work process
+with exact bracket markers and FNV-1a digests. The 262,521-byte case took 15.84
+seconds. Control input was chunked into the outer PTY between explicit bracket
+markers; this verifies the Window/TUI/Daemon path, not OS Clipboard or a single
+host paste command. An ee75 1,225,021-byte attempt returned no work-process
+bytes before the 180-second watchdog. The subsequent M5 commit 0c6b4160
+(CLI SHA-256 4f93fd0cc2815a12d939c50ec835a65d33a688b997bfa5bce355b0248fd1233a)
+keeps the same Window TUI child and Shell attached after a 1,048,608-byte
+over-limit input. The outer grid displayed an exact 1,048,576-byte-limit
+rejection; a following 301-byte paste reached the work process with exact
+markers/digest and no oversized bytes. The card appeared about 56 seconds
+after the end marker because the outer console was still draining input. This
+is bounded functional recovery, not acceptable latency or a total input-memory
+budget. The test runner's separate cold-start case exited before a visible
+HWND; it does not overturn earlier cold-start acceptance. Cancellation,
+disconnect/backpressure and the shared CLI source-build closure remain Pending.
+An isolated source combination of M3, exact M5 0c6b4160 changed-file hashes
+and M4 Reader 8eaed290 passes Window crate Rust 1.96.1 metadata, fmt,
+all-target check, six tests and strict Clippy. The full CLI offline metadata
+step lacks cached `async-broadcast` 0.7.2; M5 owns its independent CLI build.
+
+## Reader host preparation
+
+The Window crate pins Reader Core revision
+[`8eaed290`](https://github.com/Mahjong404/Loomterm/tree/8eaed290ea56471fde8ccade9366ee0076c97ef2/apps/loomterm-reader-core)
+from M4. `ReaderHost` owns one logical preview slot per Window client, bounds
+loading to one active worker plus one replaceable pending request, rejects stale
+generations, forwards viewport/input changes and resource-size/failure callbacks,
+and requires the renderer to recheck the current-frame lease before painting.
+The adapter creates no native document surface and currently does not draw
+Reader clusters, images or formulas. This is M4-C preparation only; the terminal
+Window and its M3 acceptance remain independent. Reader Core's MIT license and
+dependency notices remain with that exact source revision; no Reader binaries
+or source snapshot are copied into this branch.
 
 ## Short manual completion check
 

@@ -38,13 +38,16 @@ work process. With M2's separately owned input-state fix, supplementary input
 also reaches an actual PowerShell string as exact UTF-8. The original fixed
 M2 binary still drops it. The M2 owner has since published its input fix in a
 later M2 branch commit, but this Window branch remains on its fixed older base.
-M3 has staged and GUI-tested a newer M2-owned CLI candidate (SHA-256 463df14d...),
-not a published Window branch dependency. No automatic PR rebase is implied.
-A raw ReadFile console-mode test still yields
-replacement characters with verified input CP 65001 and mode 0x280; native
-SendInput chord tests also have failures.
-This is a partial repair, not complete native Unicode input acceptance.
-Window-crate metadata, fmt, all-target check, four Cargo tests and strict
+M3 has staged and GUI-tested M2-owned CLI candidates, not a published Window
+branch dependency. A later focused physical test on the exact M5 CLI candidate
+below delivered Shift+X, Ctrl+K, Alt+X and F6 through the actual Window to the
+raw work process as `58 0b 1b 78 1b 5b 31 37 7e`, with the same Shell retained.
+This supersedes earlier failed/foreground-skipped chord probes for that limited
+sequence. Arrow/navigation keys, other function keys, physical mouse input and
+raw-console non-BMP `ReadFile` remain separate; the latter still yields four
+replacement characters at input CP 65001 and mode 0x280. This is not complete
+native Unicode acceptance.
+Window-crate metadata, fmt, all-target check, six Cargo tests and strict
 all-target Clippy pass on fixed Rust 1.96.1 MSVC using the existing offline
 dependency/toolchain cache and an isolated Window target directory.
 This supersedes the earlier default-cache sha2 resolution failure and
@@ -80,14 +83,32 @@ reclaims all graphics resources. Retain the original
 [license](../../third-party/licenses/microsoft-conpty/LICENSE.txt) and
 [NOTICE](../../third-party/licenses/microsoft-conpty/NOTICE.md).
 
-No fourth host patch was added for large paste. An M3-owned 256 KiB-capped raw
+No fourth host patch was added for large paste. An M3-owned 2 MiB-capped raw
 work-process fixture records paste delimiters, bytes and FNV-1a. In a real Window
 using candidate 463df14d, 301/1,141/2,261-byte pastes pass in 0.39/2.25/8.39
 seconds; 4,501 bytes produce no complete event within 15 seconds. The same
 4,501-byte raw prewrapped input also stalls. The shared client framer already
 uses an incremental terminator search; the bottleneck is not yet localized.
 M3 sent its exact case to M2 and does not
-patch shared CLI source concurrently. Cancel/disconnect/backpressure remain open.
+patch shared CLI source concurrently. With separately staged M5 ee75bec4
+(CLI SHA-256 1bdef492e5a0b900718693ffdf2e123baa35a4244d5dc2f99bdde9920c64945),
+actual Window-to-work-process cases of 301, 4,501, 16,379, 29,771 and 262,521
+wire bytes pass exact markers/digest using a same-root prestarted Daemon. The
+262,521-byte case takes 15.84 seconds. A 1,225,021-byte attempt leaves the
+work-process reader at zero bytes until its 180-second watchdog, consistent
+with the client's 1 MiB retained-input admission bound. The later M5 0c6b4160
+binary (SHA-256 4f93fd0cc2815a12d939c50ec835a65d33a688b997bfa5bce355b0248fd1233a)
+visibly rejected a 1,048,608-byte input at the 1,048,576-byte limit; the same
+TUI child/Shell then delivered a 301-byte paste with exact markers/digest and
+no oversized work-process bytes. The card appeared only about 56 seconds after
+the end marker during outer-console drain, so latency remains a performance
+issue. This is chunked outer-PTY protocol input, not an OS Clipboard test.
+Cancel/disconnect/backpressure remain open. Window crate Rust 1.96.1 metadata,
+fmt, all-target check, six tests and strict Clippy passed in an isolated source
+combination with exact ee75bec4 changed-file hashes, then again after exact
+0c6b4160 changed-file hashes were added. CLI full offline metadata in that
+combination lacked cached `async-broadcast` 0.7.2, so M3 does not certify
+the CLI source-build closure. M5 independently owns its CLI build.
 
 ## Shared-client viewport dependency verification
 

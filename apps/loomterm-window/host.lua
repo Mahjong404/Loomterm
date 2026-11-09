@@ -7,6 +7,8 @@ return {
   enable_tab_bar = false,
   disable_default_key_bindings = true,
   use_ime = true,
+  -- Explicit diagnostics only; keep ordinary user input out of debug logs.
+  debug_key_events = os.getenv('LOOMTERM_WINDOW_TRACE_KEYS') == '1',
   scrollback_lines = 0,
   exit_behavior = 'Close',
   window_close_confirmation = 'NeverPrompt',
