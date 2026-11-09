@@ -431,7 +431,7 @@ fn windows_console_input_items(
         _ => return WindowsInputItems::Closed,
     }
 
-    let mut records = [windows_sys::Win32::System::Console::INPUT_RECORD::default(); 64];
+    let mut records = [windows_sys::Win32::System::Console::INPUT_RECORD::default(); 512];
     let mut read = 0;
     let ok = unsafe {
         windows_sys::Win32::System::Console::ReadConsoleInputW(
