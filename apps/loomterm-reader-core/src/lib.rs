@@ -26,7 +26,9 @@ mod reader;
 mod source;
 pub mod view;
 
-pub use image::{BlockedImage, ImageReference};
+pub use image::{
+    load_local_image, BlockedImage, DecodedImage, ImageLimits, ImageLoadError, ImageReference,
+};
 pub use model::*;
 pub use parse::parse_markdown;
 pub use reader::{Apply, Document, LoadRequest, LoadResult, Reader, ReaderState, Update};

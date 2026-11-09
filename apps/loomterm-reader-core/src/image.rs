@@ -1,9 +1,155 @@
-use std::path::{Path, PathBuf};
+use crate::{source::read_local_bytes, Cancellation, ReaderError, Resource};
+use image::{error::LimitErrorKind, ImageFormat, ImageReader};
+use std::{
+    io::Cursor,
+    path::{Path, PathBuf},
+};
+
+/// Per-decode limits. A host also needs an aggregate, per-window image cache cap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImageLimits {
+    pub encoded_bytes: usize,
+    pub pixels: u64,
+    pub dimension: u32,
+}
+
+impl Default for ImageLimits {
+    fn default() -> Self {
+        Self {
+            encoded_bytes: 8 * 1024 * 1024,
+            pixels: 4_000_000,
+            dimension: 8192,
+        }
+    }
+}
+
+impl ImageLimits {
+    fn validate(self) -> Result<Self, ImageLoadError> {
+        if self.encoded_bytes > 16 * 1024 * 1024
+            || self.pixels > 8_000_000
+            || self.dimension > 16_384
+        {
+            return Err(ImageLoadError::InvalidLimits);
+        }
+        Ok(self)
+    }
+}
+
+/// Tightly packed, top-down RGBA8. The host owns this buffer after return and
+/// must release it when its ResourceTicket is stale or the Reader HWND closes.
+#[derive(Debug)]
+pub struct DecodedImage {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+impl DecodedImage {
+    pub fn stride_bytes(&self) -> usize {
+        self.width as usize * 4
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ImageLoadError {
+    Blocked(BlockedImage),
+    Source(ReaderError),
+    InvalidLimits,
+    EncodedBytes,
+    Dimensions,
+    DecoderBudget,
+    UnsupportedFormat,
+    Decode,
+}
+
+impl std::fmt::Display for ImageLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+impl std::error::Error for ImageLoadError {}
+
+/// Decode only an explicitly resolved local image. No URL loader, HTML or script.
+/// Blocking I/O and codec work belong on a bounded worker, never the UI thread.
+/// Cancellation is cooperative at read and before/after decode, not inside codecs.
+pub fn load_local_image(
+    reference: &ImageReference,
+    limits: ImageLimits,
+    cancel: &Cancellation,
+) -> Result<DecodedImage, ImageLoadError> {
+    let limits = limits.validate()?;
+    let path = match reference {
+        ImageReference::Local { path } => path,
+        ImageReference::Blocked { reason, .. } => return Err(ImageLoadError::Blocked(*reason)),
+    };
+    let (_, bytes, _) = read_local_bytes(path, limits.encoded_bytes, cancel).map_err(|error| {
+        if error == ReaderError::Limit(Resource::SourceBytes) {
+            ImageLoadError::EncodedBytes
+        } else {
+            ImageLoadError::Source(error)
+        }
+    })?;
+    cancel.check().map_err(ImageLoadError::Source)?;
+    let format = image::guess_format(&bytes).map_err(|_| ImageLoadError::UnsupportedFormat)?;
+    if !matches!(
+        format,
+        ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::WebP
+    ) {
+        return Err(ImageLoadError::UnsupportedFormat);
+    }
+    let reader = || {
+        let mut reader = ImageReader::with_format(Cursor::new(bytes.as_slice()), format);
+        let mut decode_limits = image::Limits::default();
+        decode_limits.max_image_width = Some(limits.dimension);
+        decode_limits.max_image_height = Some(limits.dimension);
+        // Decoder intermediate allocations are best effort in image 0.25;
+        // the output size is checked strictly below before conversion.
+        decode_limits.max_alloc = Some(limits.pixels.saturating_mul(16));
+        reader.limits(decode_limits);
+        reader
+    };
+    let (width, height) = reader().into_dimensions().map_err(map_decode_error)?;
+    let pixels = u64::from(width) * u64::from(height);
+    if width == 0
+        || height == 0
+        || width > limits.dimension
+        || height > limits.dimension
+        || pixels > limits.pixels
+        || pixels
+            .checked_mul(4)
+            .and_then(|n| usize::try_from(n).ok())
+            .is_none()
+    {
+        return Err(ImageLoadError::Dimensions);
+    }
+    cancel.check().map_err(ImageLoadError::Source)?;
+    let decoded = reader().decode().map_err(map_decode_error)?;
+    cancel.check().map_err(ImageLoadError::Source)?;
+    let rgba = decoded.into_rgba8();
+    if rgba.dimensions() != (width, height) || rgba.as_raw().len() != (pixels * 4) as usize {
+        return Err(ImageLoadError::Decode);
+    }
+    Ok(DecodedImage {
+        width,
+        height,
+        rgba: rgba.into_raw(),
+    })
+}
+
+fn map_decode_error(error: image::ImageError) -> ImageLoadError {
+    match error {
+        image::ImageError::Limits(limit) => match limit.kind() {
+            LimitErrorKind::DimensionError => ImageLoadError::Dimensions,
+            _ => ImageLoadError::DecoderBudget,
+        },
+        _ => ImageLoadError::Decode,
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ImageReference {
     /// Resolution performs no I/O, existence check, decoding or authorization grant.
-    /// The future image loader must revalidate this path at open time.
+    /// The explicit image loader revalidates this path at open time.
     Local { path: PathBuf },
     Blocked {
         destination: String,

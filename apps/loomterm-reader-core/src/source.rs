@@ -45,6 +45,20 @@ pub fn read_source(
     cancel: &Cancellation,
 ) -> Result<Source, ReaderError> {
     limits.validate()?;
+    let (path, bytes, stamp) = read_local_bytes(path, limits.source_bytes, cancel)?;
+    let text = String::from_utf8(bytes).map_err(|e| ReaderError::InvalidEncoding {
+        valid_up_to: e.utf8_error().valid_up_to(),
+    })?;
+    Ok(Source { path, text, stamp })
+}
+
+/// Revalidate a local regular file at open time for source or image reads.
+/// The byte cap applies to the stream as well as advisory metadata.
+pub(crate) fn read_local_bytes(
+    path: &Path,
+    max_bytes: usize,
+    cancel: &Cancellation,
+) -> Result<(PathBuf, Vec<u8>, SourceStamp), ReaderError> {
     cancel.check()?;
     if path.as_os_str().len() > crate::MAX_PATH_BYTES {
         return Err(ReaderError::Limit(Resource::PathBytes));
@@ -74,7 +88,7 @@ pub fn read_source(
     }
     let metadata = fs::symlink_metadata(&path).map_err(|e| ReaderError::io("metadata", e))?;
     regular(&metadata)?;
-    if metadata.len() > limits.source_bytes as u64 {
+    if metadata.len() > max_bytes as u64 {
         return Err(ReaderError::Limit(Resource::SourceBytes));
     }
     let mut file = crate::platform::open_file(&path).map_err(|e| ReaderError::io("open", e))?;
@@ -82,7 +96,7 @@ pub fn read_source(
         .metadata()
         .map_err(|e| ReaderError::io("metadata", e))?;
     regular(&before)?;
-    let bytes = read_bounded(&mut file, limits.source_bytes, cancel)?;
+    let bytes = read_bounded(&mut file, max_bytes, cancel)?;
     let after = file
         .metadata()
         .map_err(|e| ReaderError::io("metadata", e))?;
@@ -90,14 +104,7 @@ pub fn read_source(
     if stamp(&before) != stamp(&after) || after.len() != bytes.len() as u64 {
         return Err(ReaderError::ChangedDuringRead);
     }
-    let text = String::from_utf8(bytes).map_err(|e| ReaderError::InvalidEncoding {
-        valid_up_to: e.utf8_error().valid_up_to(),
-    })?;
-    Ok(Source {
-        path,
-        text,
-        stamp: stamp(&after),
-    })
+    Ok((path, bytes, stamp(&after)))
 }
 
 // Generic Read is only the narrow failure/cancellation seam, not a document platform.
