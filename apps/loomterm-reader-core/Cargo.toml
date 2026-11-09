@@ -15,6 +15,7 @@ pulldown-cmark = { version = "=0.13.6", default-features = false }
 unicode-segmentation = "=1.13.3"
 unicode-width = "=0.2.2"
 unicode-linebreak = "=0.1.5"
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
 
 [lints.rust]
 unsafe_code = "forbid"
@@ -25,4 +26,8 @@ harness = false
 
 [[bench]]
 name = "view"
+harness = false
+
+[[bench]]
+name = "image"
 harness = false
