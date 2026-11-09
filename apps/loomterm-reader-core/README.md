@@ -6,9 +6,9 @@ Window Draft PR #1 pins a fixed Reader revision for a native text/image surface;
 this library itself owns no native window. It produces draw data and bounded
 local PNG/JPEG/WebP RGBA8 decode results without a GPU, terminal renderer or
 working Terminal Owner. Native image painting and the new semantic paint roles
-have scoped Windows HWND fixture Pass in M3's isolated worktree. That M3 host
-patch is not yet in its Draft PR; formula painting and the full M4 visual/lifecycle
-gates remain Pending.
+have scoped Windows HWND fixture Pass. M3's Window-owned style adapter is now
+in its Draft PR #1 on fixed Reader `7e11dcca…`; formula painting and the full
+M4 visual/lifecycle gates remain Pending.
 
 The crate directory is the Reader physical development/build boundary. Its own
 manifest, lockfile, source, tests and output do not change either concurrent
