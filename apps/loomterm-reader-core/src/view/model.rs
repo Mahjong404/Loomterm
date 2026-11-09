@@ -113,6 +113,7 @@ pub struct LogicalSize {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Metrics {
     pub block_gap: u8,
+    pub heading_gap: u8,
     pub indent: u8,
     pub tab_stop: u8,
     pub cjk_ambiguous: bool,
@@ -123,6 +124,7 @@ impl Default for Metrics {
     fn default() -> Self {
         Self {
             block_gap: 1,
+            heading_gap: 2,
             indent: 2,
             tab_stop: 4,
             cjk_ambiguous: false,
@@ -139,7 +141,12 @@ impl Default for Metrics {
 }
 impl Metrics {
     pub(super) fn validate(self) -> Result<(), ViewError> {
-        if self.block_gap > 8 || self.indent > 8 || self.tab_stop == 0 || self.tab_stop > 16 {
+        if self.block_gap > 8
+            || self.heading_gap > 8
+            || self.indent > 8
+            || self.tab_stop == 0
+            || self.tab_stop > 16
+        {
             return Err(ViewError::InvalidLimits);
         }
         validate_size(self.image)?;
@@ -171,6 +178,29 @@ pub struct Style {
     pub link: Option<NodeId>,
     pub cell: Option<u16>,
 }
+/// Theme-neutral paint roles. The Window host chooses fonts, colors and DPI sizes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SurfaceRole {
+    Plain,
+    Quote,
+    CodeBlock,
+    InlineCode,
+    TableHeader,
+    TableBody,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PaintStyle {
+    pub heading_level: Option<u8>,
+    pub bold: bool,
+    pub italic: bool,
+    pub strike: bool,
+    pub monospace: bool,
+    pub underline: bool,
+    pub focused_link: bool,
+    pub selected: bool,
+    pub surface: SurfaceRole,
+    pub table_cell: Option<u16>,
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceLocation {
     pub bytes: Range<usize>,
@@ -198,6 +228,15 @@ pub struct Block {
 impl Block {
     pub fn wraps(&self) -> bool {
         !matches!(self.role, BlockRole::Code | BlockRole::TableRow { .. })
+    }
+    pub(super) fn gap_rows(&self, metrics: Metrics) -> u32 {
+        if !self.gap_after {
+            return 0;
+        }
+        match self.role {
+            BlockRole::Heading(_) => u32::from(metrics.heading_gap),
+            _ => u32::from(metrics.block_gap),
+        }
     }
 }
 #[derive(Clone, Debug)]
@@ -316,6 +355,36 @@ pub struct Frame {
 impl Frame {
     pub fn text<'a>(&'a self, cluster: &DrawCluster) -> &'a str {
         &self.projection.blocks[cluster.block].text[cluster.text.clone()]
+    }
+    /// Resolve the visible semantic treatment without choosing a host renderer.
+    /// Code-block surfaces apply to the whole DrawLine, including empty lines.
+    pub fn paint_style(&self, line: &DrawLine, cluster: &DrawCluster) -> PaintStyle {
+        let heading_level = match line.role {
+            BlockRole::Heading(level) => Some(level),
+            _ => None,
+        };
+        let surface = match line.role {
+            BlockRole::Code => SurfaceRole::CodeBlock,
+            BlockRole::TableRow { header: true } => SurfaceRole::TableHeader,
+            BlockRole::TableRow { header: false } => SurfaceRole::TableBody,
+            _ if cluster.style.code => SurfaceRole::InlineCode,
+            _ if line.quote_depth > 0 => SurfaceRole::Quote,
+            _ => SurfaceRole::Plain,
+        };
+        PaintStyle {
+            heading_level,
+            bold: heading_level.is_some()
+                || cluster.style.strong
+                || matches!(line.role, BlockRole::TableRow { header: true }),
+            italic: cluster.style.emphasis,
+            strike: cluster.style.strike,
+            monospace: cluster.style.code || matches!(line.role, BlockRole::Code),
+            underline: cluster.style.link.is_some(),
+            focused_link: cluster.style.link.is_some() && cluster.style.link == self.focused_link,
+            selected: self.is_selected(cluster),
+            surface,
+            table_cell: cluster.style.cell,
+        }
     }
     pub fn hit_test(&self, column: u16, row: u16) -> Option<&DrawCluster> {
         if column >= self.viewport.columns || row >= self.viewport.rows {

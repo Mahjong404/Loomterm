@@ -30,7 +30,7 @@ pub(super) fn estimate(block: &Block, viewport: Viewport, metrics: Metrics) -> u
     } else {
         1
     };
-    (rows + usize::from(block.gap_after) * usize::from(metrics.block_gap)) as u64
+    rows as u64 + u64::from(block.gap_rows(metrics))
 }
 fn indent(block: &Block, viewport: Viewport, metrics: Metrics) -> u32 {
     (u32::from(block.quote_depth + block.list_depth) * u32::from(metrics.indent))
@@ -139,11 +139,7 @@ pub(super) fn shape(
             .sum::<usize>();
     Ok(Page {
         lines,
-        rows: y + if block.gap_after {
-            u32::from(metrics.block_gap)
-        } else {
-            0
-        },
+        rows: y + block.gap_rows(metrics),
         bytes,
     })
 }
