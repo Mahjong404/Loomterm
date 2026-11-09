@@ -48,6 +48,16 @@ class SyntheticImageTests(unittest.TestCase):
         self.assertIn(b"M3_PNG_REPLACE", output)
         self.assertIn(__import__("base64").b64encode(alternate), output)
 
+    def test_bounded_distinct_variants_keep_one_image_identity(self):
+        variants = [fixture.png(variant=i) for i in range(1, 9)]
+        self.assertEqual(len(set(variants)), 8)
+        for i, data in enumerate(variants, start=1):
+            output = subprocess.run([sys.executable, str(source), "--variant", str(i)],
+                                    capture_output=True, check=True, timeout=5).stdout
+            self.assertTrue(output.startswith(b"\x1b[H\x1b_Ga=T,f=100,i=4242,q=2,c=8,r=4;"))
+            self.assertIn(f"M3_PNG_VARIANT_{i}".encode(), output)
+            self.assertIn(__import__("base64").b64encode(data), output)
+
     def test_invalid_replacement_is_bounded_truncated_png(self):
         output = subprocess.run([sys.executable, str(source), "--invalid"],
                                 capture_output=True, check=True, timeout=5).stdout
