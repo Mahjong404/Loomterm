@@ -2219,6 +2219,9 @@ mod tests {
             "writer exited while cloned handles were still alive"
         );
 
+        // Windows lingers after a successful pipe write until the peer closes.
+        // End the already-read client before checking prompt writer teardown.
+        drop(client_stream);
         drop(cloned_writer);
         done_rx
             .recv_timeout(Duration::from_millis(100))
