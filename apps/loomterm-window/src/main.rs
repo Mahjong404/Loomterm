@@ -5,6 +5,8 @@ use std::io::Read;
 use std::{env, ffi::OsString, fs, io, path::PathBuf, process::Command};
 
 pub mod reader_host;
+#[cfg(windows)]
+mod reader_surface;
 
 fn verify_host(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     // Verify the build-produced manifest before executing even a contract probe.
@@ -51,6 +53,7 @@ struct Options {
     root: PathBuf,
     cwd: PathBuf,
     session: OsString,
+    reader_file: Option<PathBuf>,
     check: bool,
 }
 
@@ -67,6 +70,7 @@ fn options(args: impl IntoIterator<Item = OsString>) -> Result<Options, String> 
             }),
         cwd: env::current_dir().map_err(|e| e.to_string())?,
         session: OsString::from("default"),
+        reader_file: None,
         check: false,
     };
     let mut args = args.into_iter();
@@ -82,11 +86,18 @@ fn options(args: impl IntoIterator<Item = OsString>) -> Result<Options, String> 
             Some("--root") => o.root = value.into(),
             Some("--cwd") => o.cwd = value.into(),
             Some("--session") => o.session = value,
+            Some("--reader-file") => o.reader_file = Some(value.into()),
             _ => return Err(format!("unknown option: {}", arg.to_string_lossy())),
         }
     }
     if !o.root.is_absolute() || !o.cwd.is_absolute() {
         return Err("root and cwd must be absolute".into());
+    }
+    if o.reader_file
+        .as_ref()
+        .is_some_and(|path| !path.is_absolute())
+    {
+        return Err("reader file must be absolute".into());
     }
     Ok(o)
 }
@@ -135,6 +146,10 @@ fn run(o: Options) -> Result<(), Box<dyn std::error::Error>> {
     verify_host(&host)?;
     verify_image_runtime(&cli)?;
     let o = Options { cli, host, ..o };
+    // Reader Core validates the original local path and rejects reparse points.
+    // canonicalize() adds a \? prefix on Windows, which its local-path
+    // contract intentionally rejects.
+    let reader_file = o.reader_file.clone();
     // Reuse the production root/session validator without starting a Daemon.
     let mut validator = Command::new(&o.cli);
     #[cfg(windows)]
@@ -176,6 +191,22 @@ fn run(o: Options) -> Result<(), Box<dyn std::error::Error>> {
         let mut c = command(&o, &config);
         if o.check {
             println!("{c:?}");
+        } else if let Some(path) = reader_file.as_deref() {
+            #[cfg(windows)]
+            {
+                let mut child = c.spawn()?;
+                let status = match reader_surface::run(path, &mut child) {
+                    Ok(status) => status,
+                    Err(error) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(error);
+                    }
+                };
+                if !status.success() {
+                    return Err(format!("Window host exited: {status}").into());
+                }
+            }
         } else {
             let status = c.status()?;
             if !status.success() {
@@ -277,5 +308,6 @@ mod tests {
         assert!(options(["--root".into(), "relative".into()]).is_err());
         assert!(options(["--unknown".into(), "value".into()]).is_err());
         assert!(options(["--session".into()]).is_err());
+        assert!(options(["--reader-file".into(), "relative.md".into()]).is_err());
     }
 }

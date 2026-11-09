@@ -424,4 +424,27 @@ mod tests {
         assert!(host.current_paint_frame().is_none());
         assert!(host.frame(&Cancellation::default()).unwrap().is_some());
     }
+
+    #[test]
+    fn bounded_projection_finishes_across_pending_frames() {
+        let files = Files::new();
+        let content = (0..500)
+            .map(|index| format!("Paragraph {index:04}: fixed content.\n\n"))
+            .collect::<String>();
+        let path = files.write("many.md", &content);
+        let mut host = ReaderHost::new(Viewport::new(60, 20).unwrap()).unwrap();
+        host.open(&path).unwrap();
+        wait_loaded(&mut host);
+        let mut pending = 0;
+        loop {
+            let frame = host.frame(&Cancellation::default()).unwrap().unwrap();
+            if !frame.pending {
+                break;
+            }
+            pending += 1;
+            assert!(pending < 200, "bounded projection did not complete");
+        }
+        assert!(pending > 0, "fixture did not exercise pending projection");
+        assert!(visible_text(&mut host).contains("Paragraph 0000"));
+    }
 }

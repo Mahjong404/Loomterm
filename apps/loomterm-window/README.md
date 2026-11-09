@@ -5,7 +5,7 @@ terminal TUI in a dedicated native Windows host and connects to the same
 Loomterm Daemon as Loomterm CLI. It adds no Workspace or work-terminal owner.
 
 This branch depends on M2 commit `56b0ae5f7b0c2e6a1c9fcc30dc313bbcabc0022b`.
-The M2 branch has since advanced to `0e975b9167bd8bc49cf0cffb4b4cb6ce31405379`;
+The M2 branch has since advanced to `9d97c1673cc54aac499d5f7680e8467d7ffb197f`;
 this Window branch has not been rebased on that commit. A separate M2-owned
 CLI candidate was tested inside the staged Window, but that does not update the
 branch dependency or certify a build from the latest M2 HEAD.
@@ -235,10 +235,10 @@ HWND; it does not overturn earlier cold-start acceptance. Cancellation,
 disconnect/backpressure and the shared CLI source-build closure remain Pending.
 An isolated source combination of M3, exact M5 0c6b4160 changed-file hashes
 and M4 Reader 8eaed290 passes Window crate Rust 1.96.1 metadata, fmt,
-all-target check, six tests and strict Clippy. The full CLI offline metadata
+all-target check, seven tests and strict Clippy. The full CLI offline metadata
 step lacks cached `async-broadcast` 0.7.2; M5 owns its independent CLI build.
 
-## Reader host preparation
+## Reader native window (developer entry)
 
 The Window crate pins Reader Core revision
 [`8eaed290`](https://github.com/Mahjong404/Loomterm/tree/8eaed290ea56471fde8ccade9366ee0076c97ef2/apps/loomterm-reader-core)
@@ -246,11 +246,32 @@ from M4. `ReaderHost` owns one logical preview slot per Window client, bounds
 loading to one active worker plus one replaceable pending request, rejects stale
 generations, forwards viewport/input changes and resource-size/failure callbacks,
 and requires the renderer to recheck the current-frame lease before painting.
-The adapter creates no native document surface and currently does not draw
-Reader clusters, images or formulas. This is M4-C preparation only; the terminal
-Window and its M3 acceptance remain independent. Reader Core's MIT license and
+The Windows launcher opens a separate native Reader HWND for an explicit
+absolute local source path while retaining the terminal host:
+
+```powershell
+./target/loomterm-window/dev/loomterm-window.exe --reader-file C:\absolute\notes.md
+```
+
+This developer entry paints Reader Core text clusters, advances bounded pending
+work, maps DPI/resize to its private viewport, handles Reader scroll/navigation
+and Clipboard copy, and closes without stopping the host, Daemon or work Shell.
+There is one Reader HWND per launcher and one ReaderHost slot. No TUI command
+opens it yet. The GDI surface does not paint semantic styles, images or formulas;
+wide-character right-half selection and physical wheel remain Pending.
+The exact fixed Reader revision was found in the existing Cargo cache and used
+for Rust 1.96.1 builds. The one authorized isolated Git fetch of that SHA
+failed with Windows schannel SEC_E_NO_CREDENTIALS; no other SHA was fetched.
+The terminal Window and its M3 acceptance remain independent. Reader Core's MIT license and
 dependency notices remain with that exact source revision; no Reader binaries
 or source snapshot are copied into this branch.
+
+The private native Win32 fixture opens the actual Reader HWND, captures painted
+Markdown, resizes and sends a bounded wheel event, closes Reader via SC_CLOSE,
+and verifies terminal, Shell and Daemon survival. A missing-source case paints
+the Core error. In one close case launcher GDI objects went from 48 to 47 while
+the terminal remained alive. Foreground protection blocked physical wheel
+injection, so that device path and full selection/cursor visuals remain Pending.
 
 ## Short manual completion check
 

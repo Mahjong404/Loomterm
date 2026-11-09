@@ -1,5 +1,15 @@
 # Window host patch ledger
 
+The separate Loomterm-owned launcher now has an optional native Reader HWND
+behind `--reader-file`. This adds no WezTerm adapter patch and keeps the fixed
+Reader Core dependency at `8eaed290ea56471fde8ccade9366ee0076c97ef2`.
+GDI draws text clusters from Core frames; DPI, resize, wheel, key navigation,
+selection copy and SC_CLOSE stay in the Window process. A native fixture proved
+paint/resize/synthetic wheel, error page, and Reader close with the terminal,
+Shell and Daemon still alive. The measured launcher GDI count fell 48 to 47
+after Reader close. Semantic styles, images/formulas, physical wheel and exact
+wide-character selection remain unaccepted. Formal M3 Gate is still Pending.
+
 The adapter targets the fixed revision in [UPSTREAM.json](UPSTREAM.json).
 It checks the original Git blob hashes before writing any of four files. Source
 acquisition is separate; run it once on a pristine, independent source copy.
