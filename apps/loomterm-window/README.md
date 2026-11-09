@@ -300,14 +300,17 @@ remain Pending despite the host event/paint path passing.
 
 ## Short manual completion check
 
-1. Focus the test Window, resize smaller/larger, then check a fresh grid and cursor
-   against the measured inner dimensions. Record both geometry and screenshot.
-2. Type English and Chinese; observe IME preedit, candidate placement, Esc cancel
-   and exactly one commit. Check emoji, combining marks and wide-character cursor.
-3. Click/scroll between two Panes; test Ctrl/Alt/Shift/function keys. Select/copy
-   `M3_CLIP_TEST`, paste with Ctrl+Shift+V and verify exact content/target.
-4. Click the titlebar X and reopen. Check the same live work identity. Retain
-   observations as Pass/Fail/Pending; do not infer from logs or upstream features.
+1. In two Window clients, physically scroll one with the mouse wheel while the
+   other follows output; select across two Panes and verify the copied text.
+2. Resize a narrow multi-Pane Window repeatedly; inspect long-prompt reflow,
+   the exact cursor, selection boundary, CJK/combining/Emoji cells and old-frame
+   remnants against the measured inner dimensions.
+3. In the Reader HWND, physically invoke Ctrl+F, enter a short query and use
+   F3; verify match highlight, hardware wheel, selection and copy.
+
+Record the actual Window observations or screenshots. Previously confirmed
+basic IME, Clipboard, Emoji, close/reopen and keyboard cases retain their
+limited Pass scope; they need no repeat for this checklist.
 
 The deterministic image input is `tools/fixtures/window-image.py`. Run it inside
 an actual work Pane to emit a 32x32 Kitty PNG; `--output` writes the source PNG,
