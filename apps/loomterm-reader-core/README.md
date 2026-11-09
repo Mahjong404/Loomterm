@@ -5,9 +5,10 @@ a private viewport, navigation and a tested Mock Host adapter. The separate M3
 Window Draft PR #1 pins a fixed Reader revision for a native text/image surface;
 this library itself owns no native window. It produces draw data and bounded
 local PNG/JPEG/WebP RGBA8 decode results without a GPU, terminal renderer or
-working Terminal Owner. Native image painting has a scoped Windows HWND fixture
-Pass; semantic styling, formula painting and the full M4 visual/lifecycle gates
-remain Pending.
+working Terminal Owner. Native image painting and the new semantic paint roles
+have scoped Windows HWND fixture Pass in M3's isolated worktree. That M3 host
+patch is not yet in its Draft PR; formula painting and the full M4 visual/lifecycle
+gates remain Pending.
 
 The crate directory is the Reader physical development/build boundary. Its own
 manifest, lockfile, source, tests and output do not change either concurrent
@@ -322,6 +323,14 @@ projected text within individual blocks, with a 256-byte query and at most
 from an older/foreign projection. There is no regex, normalization or cross-block
 search. Headings expose levels and basic slugs with duplicate suffixes.
 
+For a native search box, the Window adapter clones the current `Arc<Projection>`
+from `ReaderView::projection()`, calls `Projection::search` on its bounded content
+worker, then passes a chosen `SearchHit` to `ReaderView::locate_search` and asks
+for a new frame. Hits carry revision identity: refresh, target replacement or
+another Window Client makes an old hit fail with `InvalidPosition`. The adapter
+owns query input, result index and highlight presentation; do not scan a large
+document inside WM_PAINT or duplicate the Markdown parser in the host.
+
 Explicit link activation returns `Action::Link(LinkTarget)`; it never opens a
 browser or file. Fragment targets navigate matching local heading slugs. Local
 file links use the same document-directory/percent-decoding/local-path rules as
@@ -425,6 +434,6 @@ resource-size reflow, semantic/grapheme layout, 10,000 paragraphs, long
 code, wide tables, resource reflow, refresh anchors, search/headings/links,
 selection, rapid scroll/resize, cancel/stale jobs, private-state isolation,
 budget/error paths and resource release. Linux/macOS runtime behavior, Unix
-symlink tests, hostile filesystem races, semantic visual styling, formula readability,
+symlink tests, hostile filesystem races, formula readability,
 broader native image behavior and full window lifecycle/reading interactions
 remain unverified. These checks do not close M3, M4 UI or M6 performance gates.
