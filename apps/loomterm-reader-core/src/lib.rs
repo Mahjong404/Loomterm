@@ -19,6 +19,8 @@
 #![forbid(unsafe_code)]
 
 mod image;
+#[cfg(feature = "math")]
+pub mod math;
 mod model;
 mod parse;
 mod platform;

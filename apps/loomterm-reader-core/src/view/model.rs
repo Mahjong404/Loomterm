@@ -402,10 +402,23 @@ impl Frame {
     /// selection. Blank rows and horizontal margins clamp to visible text.
     /// The Window adapter converts pixels using its current font/DPI metrics.
     pub fn source_point(&self, column: u16, row: u16) -> Option<SourcePoint> {
-        if column >= self.viewport.columns || row >= self.viewport.rows {
+        self.source_point_at(f64::from(column), f64::from(row))
+    }
+
+    /// Fractional logical coordinates retain subcell pointer precision, allowing
+    /// the right half of even a one-column grapheme to select its end boundary.
+    /// The host must use this frame's font/DPI geometry and check is_current_frame.
+    pub fn source_point_at(&self, column: f64, row: f64) -> Option<SourcePoint> {
+        if !column.is_finite()
+            || !row.is_finite()
+            || column < 0.
+            || row < 0.
+            || column >= f64::from(self.viewport.columns)
+            || row >= f64::from(self.viewport.rows)
+        {
             return None;
         }
-        let y = i32::from(row);
+        let y = row.floor() as i32;
         let line = self
             .lines
             .iter()
@@ -417,12 +430,15 @@ impl Frame {
                     (y - (line.y + i32::from(line.height) - 1)).max(0)
                 }
             })?;
-        let x = i32::from(column);
+        let x = column;
         let mut previous: Option<&DrawCluster> = None;
         for cluster in &line.clusters {
-            if x < cluster.x {
+            if x < f64::from(cluster.x) {
                 return Some(match previous {
-                    Some(previous) if x - (previous.x + previous.width as i32) < cluster.x - x => {
+                    Some(previous)
+                        if x - f64::from(previous.x + previous.width as i32)
+                            < f64::from(cluster.x) - x =>
+                    {
                         SourcePoint {
                             byte: previous.source.bytes.end,
                             exact: previous.source.exact,
@@ -434,8 +450,8 @@ impl Frame {
                     },
                 });
             }
-            if x < cluster.x + cluster.width as i32 {
-                let at_end = (x - cluster.x) as u32 * 2 >= cluster.width;
+            if x < f64::from(cluster.x + cluster.width as i32) {
+                let at_end = (x - f64::from(cluster.x)) * 2. >= f64::from(cluster.width);
                 return Some(SourcePoint {
                     byte: if at_end {
                         cluster.source.bytes.end

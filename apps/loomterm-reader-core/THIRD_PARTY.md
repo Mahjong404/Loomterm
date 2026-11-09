@@ -68,6 +68,27 @@ features. Unicode version changes can alter layout and must receive grapheme,
 CJK, emoji and source-mapping regression checks. Retained copyright files cover
 generated Unicode tables. No upstream implementation files were vendored.
 
-M4 semantic paint data adds no third-party package. Formula raster candidates
-are discussed in the [Reader ADR](ADR.md); none is linked, bundled or distributed
-by this crate yet, so its lockfile and retained license set are unchanged.
+M4 semantic paint data adds no third-party package. The optional `math` prototype
+adds fixed RaTeX 0.1.15 (MIT) and its raster/font/build graph, explicitly outside
+the default Reader graph. See the [Reader ADR](ADR.md) for adoption costs and
+process-global cache limits. There are 93 additional locked packages across
+all targets (119 registry packages total); the default build still selects 26.
+No CLI or Window lockfile is changed.
+
+The [math dependency legal inventory](licenses/math-dependencies.txt) records
+each added package/version, declared license, registry checksum and original
+legal text, including target-specific and build dependencies. RaTeX code's
+[MIT license](licenses/ratex-0.1.15/LICENSE) and
+[third-party notices](licenses/ratex-0.1.15/THIRD_PARTY_NOTICES.txt) are retained
+from the published crates' source commit
+`7d9f9a39218914bead8ffdf39b79028a01d12c22`. The 19 unmodified KaTeX TTFs
+(513,664 bytes) are embedded by `ratex-katex-fonts`, not copied into this
+repository. Their [copyright and reserved names](licenses/ratex-0.1.15/licenses/KaTeX-fonts-NOTICE.txt)
+and full [SIL OFL 1.1](licenses/ratex-0.1.15/licenses/SIL-OFL-1.1.txt) remain
+required when distributing a math-enabled binary. Font licenses are separate
+from RaTeX's MIT code.
+
+Primary source: [fixed RaTeX release source](https://github.com/erweixin/RaTeX/tree/7d9f9a39218914bead8ffdf39b79028a01d12c22).
+The wrapper never enables JS, a browser or document-supplied commands/font paths.
+Only Windows/MSVC execution has been tested here; optional dependency presence
+in the lockfile does not certify other platform runtimes.

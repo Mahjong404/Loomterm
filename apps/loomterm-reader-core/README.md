@@ -8,7 +8,9 @@ local PNG/JPEG/WebP RGBA8 decode results without a GPU, terminal renderer or
 working Terminal Owner. Native image painting and the new semantic paint roles
 have scoped Windows HWND fixture Pass. M3's Window-owned style adapter is now
 in its Draft PR #1 on fixed Reader `7e11dcca…`; formula painting and the full
-M4 visual/lifecycle gates remain Pending.
+M4 visual/lifecycle gates remain Pending. The optional `math` feature now
+typesets a restricted offline TeX subset into real RGBA pixels; its native
+HWND integration and process-cache release acceptance remain Pending.
 
 The crate directory is the Reader physical development/build boundary. Its own
 manifest, lockfile, source, tests and output do not change either concurrent
@@ -251,6 +253,13 @@ logical half-cell. Its `exact` flag distinguishes direct source text from
 generated markers. `Frame::is_selected(cluster)` reports source-byte overlap for
 painting. The host must check `is_current_frame` before using pointer results;
 pixel-to-column conversion remains the host's font/DPI responsibility.
+`Frame::source_point_at(f64, f64)` preserves fractional logical coordinates so
+the right half of a one-column glyph maps to its source end. Pass pointer
+pixels divided by the current font cell metrics without integer truncation.
+Non-finite, negative and outside-viewport coordinates return `None`; clamp
+captured drags at the host boundary before calling. The integer API remains
+compatible. Source selection copies original Markdown bytes, including markup
+between the endpoints; it is not formatted-text copying.
 
 ## Bound layout and keep a reading position
 
@@ -360,12 +369,43 @@ returns `resource_size(ticket, LogicalSize)` or `resource_failed`. Sizes are
 resource results from reflowing a newer document or another client. Pending
 requests may recur until resolved; they do not start work themselves.
 
-Inline `$...$` and display `$$...$$` become math syntax nodes; the Reader parser
-does not validate LaTeX commands. The current host still has no math renderer,
-so formula readability is Pending. A raster path could reuse the native RGBA8
-image surface, but any dependency must first pass fixed-version, font-license,
-command/depth/output-pixel budget and Windows-host integration checks. Converting
-to MathML alone would not make GDI paint formulas.
+Inline `$...$` and display `$$...$$` become math syntax nodes; the Markdown parser
+does not validate LaTeX commands. The optional `math::render_math` API uses fixed
+RaTeX 0.1.15 and embedded KaTeX OFL fonts to return `RenderedMath`: owned top-down
+RGBA8 pixels plus a baseline in physical pixels. The host passes `MathOptions`
+with a DPI-adjusted pixel em and foreground color, then maps bitmap dimensions
+to `LogicalSize` and applies the original revision-bound ticket. Invalid formulas
+return `MathError`; paint an error and the retained source rather than hiding the
+failure. Do not start a job per frame or install stale pixels after refresh.
+
+The default feature set stays unchanged. Enable `--features math` explicitly.
+This prototype supports ASCII TeX notation for fractions, radicals, scripts,
+sums/integrals, common Greek commands, matrices and limited text/font commands.
+It deliberately rejects macros, arbitrary commands/dimensions, HTML, URLs, file
+commands, direct non-ASCII math input and system-font fallback. See the finite
+allowlist in [math.rs](src/math.rs). Both debug and release embed fonts; no JS,
+browser, process, runtime font directory or network resource is used.
+
+| Formula budget | Default | Hard ceiling |
+| --- | --- | --- |
+| Source bytes | 2,048 | 4,096 |
+| Lexical tokens | 512 | 1,024 |
+| Brace depth | 24 | 32 |
+| Drawing items / path commands | 4,096 each | 8,192 each |
+| Output pixels | 524,288 | 1,048,576 |
+| Output dimension | 2,048 | 4,096 |
+| Physical pixels per em | 24 | 128 |
+
+Cancellation is checked between synchronous phases, not inside RaTeX or PNG.
+Input limits and upstream depth/expansion/layout checks bound supported work;
+they are not hard CPU or allocator quotas. Upstream process-global font,
+outline and glyph-mask caches outlive individual Reader windows. In particular,
+the glyph-mask cache permits 8,192 entries / 64 MiB and exposes no host purge
+API. These caches are additional to the Window's 16 MiB BGRX image cache.
+They must be included in process-memory observation and a production adoption
+review; this opt-in prototype does not claim full resource-close acceptance.
+Native formula painting, inline baseline alignment and Resize/scroll acceptance
+remain Pending until M3 consumes the raster API in its existing image surface.
 
 ## M3 adapter and M4-C entry conditions
 
@@ -419,6 +459,9 @@ cargo clippy --workspace --all-targets --locked --target x86_64-pc-windows-msvc 
 cargo bench --bench bounded --locked --target x86_64-pc-windows-msvc
 cargo bench --bench image --locked --target x86_64-pc-windows-msvc
 cargo bench --bench view --locked --target x86_64-pc-windows-msvc
+cargo test --all-features --locked --target x86_64-pc-windows-msvc
+cargo bench --bench math --features math --locked --target x86_64-pc-windows-msvc
+cargo run --example math_raster --features math --locked --target x86_64-pc-windows-msvc -- target/math-preview
 ```
 
 Unit and real-file tests cover syntax, Unicode/complex text, strict encoding,
@@ -449,3 +492,18 @@ budget/error paths and resource release. Linux/macOS runtime behavior, Unix
 symlink tests, hostile filesystem races, formula readability,
 broader native image behavior and full window lifecycle/reading interactions
 remain unverified. These checks do not close M3, M4 UI or M6 performance gates.
+
+Windows 11/MSVC follow-up on 2026-11-10 passed fixed Rust 1.96.1 locked/offline
+metadata, fmt, all-target/all-feature check, strict Clippy, 36 default tests,
+40 math-enabled tests and two compiled API examples. New coverage includes
+fractional/cross-line grapheme selection and refresh invalidation, real offline
+formula RGBA, invalid/over-budget/cancelled expressions, DPI-scaled dimensions,
+and revision-ticket reflow/close rejection. The raster example is executable
+evidence, not a native Reader window.
+
+The finite math benchmark measured a 173×59 quadratic formula: first call
+1,959 µs, then 20 warm calls with median/P95 153/168 µs. A separate fresh-process
+Windows memory observation reported 6,217,728 bytes peak working set and
+1,875,968 bytes peak PagefileUsage for that standalone benchmark. These are
+actual process counters for this small case, not multi-Reader peak memory,
+worst-case cache residency or native Paint time. M3 must measure those separately.

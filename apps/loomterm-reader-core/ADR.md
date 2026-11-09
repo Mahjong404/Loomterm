@@ -142,3 +142,45 @@ boundary. Typst would import a broader document compiler than this Reader needs.
 No math dependency or font is adopted in this change. Formula rendering stays
 Pending until the renderer, fixed dependency/license graph, expression depth and
 output-pixel budgets, and HWND raster verification can be completed together.
+
+### Offline raster prototype, 2026-11-10
+
+The preceding no-dependency decision is superseded only for an explicit opt-in
+`math` prototype. Production/native adoption stays Proposed. MathML alone leaves
+the GDI painting problem unsolved; KaTeX/MathJax would require a JS/browser host,
+and Typst adds a full document compiler. Fixed RaTeX 0.1.15 provides the smallest
+evaluated path that actually produces offline formula pixels for the existing
+RGBA image seam. This is dependency reuse, not a new Window renderer.
+
+The cost is substantial: 93 additional locked packages across all targets,
+including build dependencies and dormant platform-font/WebAssembly paths.
+They are outside the default 26-package Reader graph and outside CLI/Window
+lockfiles. The 19 unmodified embedded KaTeX TTFs total 513,664 bytes under OFL
+1.1; code is MIT. Required original texts, copyright and font notices are
+retained in the Reader license inventory. Force `rust-embed/debug-embed` so
+debug builds also embed fonts rather than reading the registry source directory.
+
+The wrapper accepts an ASCII TeX allowlist, checks bytes/tokens/brace depth,
+uses upstream recursion/expansion/layout validation, and bounds drawing items,
+path commands, dimensions and output pixels before raster allocation. Only
+embedded fonts with actual glyph outlines are permitted, preventing automatic
+system-font discovery; reject unsupported input visibly through `MathError`.
+No arbitrary macros, active HTML, document-controlled font paths, external
+commands or network resources are offered. Cancellation is cooperative between
+typesetting/PNG phases. A single bounded host worker is required.
+
+Returned RGBA buffers and baseline are host-owned, revision-ticketed resources.
+The existing image surface can consume them without a second renderer. Upstream
+font/outline/glyph caches remain process-global; the glyph-mask cache alone
+permits 64 MiB and has no public purge. This is a concrete production acceptance
+gap, not a per-HWND allocation claim. Measure actual process memory separately
+from the 16 MiB native BGRX cache, review the default dependency/build closure
+after main integration, and obtain native formula/Resize/scroll/close evidence
+before promoting the feature.
+
+Accurate pointer selection uses additive `Frame::source_point_at` with fractional
+logical coordinates; the legacy integer method delegates to it. The host owns
+pixel/font/DPI conversion, capture, Clipboard and window lifetime. It must
+revalidate frames, keep grapheme source boundaries, and clamp captured pointer
+coordinates without truncating half-cell precision. This changes no terminal
+ownership, shared scrollback or lifecycle.

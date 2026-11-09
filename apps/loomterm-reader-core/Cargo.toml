@@ -16,6 +16,21 @@ unicode-segmentation = "=1.13.3"
 unicode-width = "=0.2.2"
 unicode-linebreak = "=0.1.5"
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
+ratex-render = { version = "=0.1.15", optional = true, features = ["embed-fonts"] }
+ratex-parser = { version = "=0.1.15", optional = true }
+ratex-layout = { version = "=0.1.15", optional = true }
+ratex-types = { version = "=0.1.15", optional = true }
+ratex-font = { version = "=0.1.15", optional = true }
+ratex-font-loader = { version = "=0.1.15", optional = true }
+ab_glyph = { version = "=0.2.32", optional = true }
+# Force compile-time font embedding in debug builds too (upstream defaults read
+# its source font directory under debug_assertions without this feature).
+rust-embed = { version = "=8.13.0", optional = true, features = ["debug-embed"] }
+
+[features]
+default = []
+# Offline, bounded formula prototype; host integration is an explicit opt-in.
+math = ["dep:ratex-render", "dep:ratex-parser", "dep:ratex-layout", "dep:ratex-types", "dep:ratex-font", "dep:ratex-font-loader", "dep:ab_glyph", "dep:rust-embed"]
 
 [lints.rust]
 unsafe_code = "forbid"
@@ -31,3 +46,12 @@ harness = false
 [[bench]]
 name = "image"
 harness = false
+
+[[bench]]
+name = "math"
+harness = false
+required-features = ["math"]
+
+[[example]]
+name = "math_raster"
+required-features = ["math"]

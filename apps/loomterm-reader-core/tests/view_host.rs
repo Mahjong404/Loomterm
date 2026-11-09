@@ -738,6 +738,63 @@ fn pointer_selection_maps_visible_graphemes_and_marks_painted_clusters() {
 }
 
 #[test]
+fn fractional_pointer_selection_crosses_lines_without_splitting_graphemes() {
+    let text = "A中e\u{301}👩‍💻\nnext line\n";
+    let mut host = MockHost::open(text, 5, 12);
+    let frame = host.frame();
+    for value in ["A", "中", "e\u{301}", "👩‍💻"] {
+        let (line, glyph) = frame
+            .lines
+            .iter()
+            .find_map(|line| {
+                line.clusters
+                    .iter()
+                    .find(|c| frame.text(c) == value)
+                    .map(|c| (line, c))
+            })
+            .unwrap();
+        for (fraction, expected) in [
+            (0.25, glyph.source.bytes.start),
+            (0.75, glyph.source.bytes.end),
+        ] {
+            assert_eq!(
+                frame
+                    .source_point_at(
+                        f64::from(glyph.x) + f64::from(glyph.width) * fraction,
+                        f64::from(line.y) + 0.5
+                    )
+                    .unwrap()
+                    .byte,
+                expected
+            );
+        }
+    }
+    assert!(frame.source_point_at(f64::NAN, 0.).is_none());
+    assert!(frame.source_point_at(0., f64::INFINITY).is_none());
+    assert!(frame.source_point_at(-0.1, 0.).is_none());
+    let end = text.find("next").unwrap() + 4;
+    host.view
+        .input(
+            Input::Select { start: end, end: 0 },
+            &Cancellation::default(),
+        )
+        .unwrap();
+    assert_eq!(host.view.selection(), Some(&text[..end]));
+    let selected = host.frame();
+    assert!(!host.view.is_current_frame(&frame));
+    assert!(selected
+        .lines
+        .iter()
+        .flat_map(|l| &l.clusters)
+        .any(|c| selected.is_selected(c)));
+    fs::write(&host.file, "changed entirely\n").unwrap();
+    let request = host.view.refresh().unwrap().unwrap();
+    assert_eq!(host.view.apply(request.execute()), ViewApply::Ready);
+    assert_eq!(host.view.selection(), None);
+    assert!(!host.view.is_current_frame(&selected));
+}
+
+#[test]
 fn frame_resolves_semantic_paint_roles_and_heading_spacing() {
     let source = "# Head\n\n**strong** *em* ~~del~~ `code` [link](#head)\n\n> quote\n\n| a | b |\n|---|---|\n| x | y |\n\n```text\nabc\n```\n";
     let mut host = MockHost::open(source, 80, 30);
