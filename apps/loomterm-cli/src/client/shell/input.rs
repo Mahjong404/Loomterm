@@ -367,8 +367,9 @@ impl ClientShellState {
                 RawInputEvent::HostDefaultColor { .. }
                 | RawInputEvent::HostPaletteColors { .. }
                 | RawInputEvent::HostCellSizeReport { .. }
-                | RawInputEvent::PasteOverflow
                 | RawInputEvent::Unsupported => {}
+                #[cfg(any(windows, test))]
+                RawInputEvent::PasteOverflow => {}
             }
             self.reconcile_input_source();
         }

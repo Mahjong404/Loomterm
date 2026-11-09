@@ -90,6 +90,7 @@ pub enum RawInputEvent {
     Paste(String),
     /// The unfinished paste crossed the bounded framing allowance. The
     /// remaining bytes are discarded until the closing marker arrives.
+    #[cfg(any(windows, test))]
     PasteOverflow,
     Mouse(MouseEvent),
     OuterFocusGained,
@@ -163,6 +164,12 @@ impl RawInputFramer {
         if self.byte_framer.has_pending_bracketed_paste() {
             self.byte_framer.serialized_win32_paste = true;
         }
+    }
+
+    #[cfg(not(windows))]
+    pub(crate) fn allow_serialized_win32_paste(&mut self) {
+        // The shared Windows translation tests compile on Unix, but the Unix
+        // stdin reader never enables the serialized Win32 framing allowance.
     }
 
     pub(crate) fn has_pending_default_mouse_sequence(&self) -> bool {
