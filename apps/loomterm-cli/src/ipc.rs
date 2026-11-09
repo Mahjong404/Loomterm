@@ -1,0 +1,521 @@
+// Modified for Loomterm (2026-11-05); see apps/loomterm-cli/PATCHES.md.
+use std::fs;
+use std::io::{self, Read};
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::path::Path;
+
+#[cfg(unix)]
+use interprocess::local_socket::traits::Stream as _;
+
+pub(crate) type LocalListener = interprocess::local_socket::Listener;
+pub(crate) type LocalStream = interprocess::local_socket::Stream;
+#[cfg(unix)]
+type PrivateLocalListener = LocalListener;
+#[cfg(windows)]
+type PrivateLocalListener = crate::platform::PrivateLocalListener;
+
+pub(crate) enum LocalStreamRead {
+    Data,
+    Pending,
+    Closed,
+}
+
+pub(crate) enum LocalStreamReadCount {
+    Data(usize),
+    Pending,
+    Closed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SocketFileIdentity {
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+    #[cfg(windows)]
+    marker: Vec<u8>,
+}
+
+pub(crate) fn connect_local_stream(path: &Path) -> io::Result<LocalStream> {
+    crate::product::validate_endpoint_target(path)?;
+    #[cfg(unix)]
+    {
+        crate::platform::unix_paths::validate_native_socket_path(path)?;
+        crate::platform::unix_paths::validate_existing_socket(path)?;
+        use interprocess::local_socket::{prelude::*, GenericFilePath};
+
+        let name = path.to_fs_name::<GenericFilePath>()?;
+        LocalStream::connect(name)
+    }
+
+    #[cfg(windows)]
+    {
+        use interprocess::local_socket::{prelude::*, GenericNamespaced};
+
+        let name = crate::product::pipe_name(path)?;
+        let name = name.to_ns_name::<GenericNamespaced>()?;
+        LocalStream::connect(name).map_err(crate::platform::local_server_connection_error)
+    }
+}
+
+pub(crate) fn connect_local_stream_cancellable(
+    path: &Path,
+    stopped: &std::sync::atomic::AtomicBool,
+    deadline: std::time::Instant,
+) -> io::Result<LocalStream> {
+    crate::product::validate_endpoint_target(path)?;
+    #[cfg(unix)]
+    {
+        crate::platform::unix_paths::validate_native_socket_path(path)?;
+        crate::platform::unix_paths::validate_existing_socket(path)?;
+    }
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+    loop {
+        if stopped.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "connection attempt cancelled",
+            ));
+        }
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::TimedOut, "endpoint connection timed out")
+            })?;
+        let timeout = remaining.min(Duration::from_millis(100));
+        #[cfg(unix)]
+        let result = {
+            use interprocess::local_socket::{ConnectOptions, GenericFilePath, ToFsName as _};
+            ConnectOptions::new()
+                .name(path.to_fs_name::<GenericFilePath>()?)
+                .wait_mode(interprocess::ConnectWaitMode::Timeout(timeout))
+                .connect_sync()
+        };
+        #[cfg(windows)]
+        let result = crate::platform::connect_local_stream_with_timeout(path, timeout);
+        match result {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                ) => {}
+            result => return result,
+        }
+    }
+}
+
+pub(crate) fn bind_local_listener(path: &Path) -> io::Result<LocalListener> {
+    crate::product::validate_endpoint_target(path)?;
+    #[cfg(unix)]
+    {
+        crate::platform::unix_paths::validate_native_socket_path(path)?;
+        use interprocess::local_socket::{prelude::*, GenericFilePath, ListenerOptions};
+
+        let name = path.to_fs_name::<GenericFilePath>()?;
+        ListenerOptions::new()
+            .name(name)
+            .reclaim_name(false)
+            .create_sync()
+    }
+
+    #[cfg(windows)]
+    {
+        use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions};
+        use interprocess::os::windows::local_socket::ListenerOptionsExt as _;
+
+        let name = crate::product::pipe_name(path)?;
+        let name = name.to_ns_name::<GenericNamespaced>()?;
+        let listener = ListenerOptions::new()
+            .name(name)
+            .reclaim_name(false)
+            .security_descriptor(crate::platform::local_server_security_descriptor()?)
+            .create_sync()?;
+        fs::write(path, windows_socket_marker())?;
+        Ok(listener)
+    }
+}
+
+pub(crate) fn prepare_socket_path(
+    path: &Path,
+    busy_message: impl FnOnce(&Path) -> String,
+) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        crate::platform::unix_paths::validate_native_socket_path(path)?;
+        crate::platform::unix_paths::validate_existing_socket(path)?;
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    if !path.exists() {
+        return Ok(());
+    }
+
+    match connect_local_stream(path) {
+        Ok(_) => {
+            return Err(io::Error::new(io::ErrorKind::AddrInUse, busy_message(path)));
+        }
+        Err(err) if stale_socket_connect_error(err.kind()) => {}
+        Err(err) => return Err(err),
+    }
+
+    if let Err(err) = fs::remove_file(path) {
+        if err.kind() != io::ErrorKind::NotFound {
+            return Err(err);
+        }
+    }
+
+    Ok(())
+}
+
+fn stale_socket_connect_error(kind: io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+    ) || (cfg!(windows) && matches!(kind, io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock))
+}
+
+pub(crate) fn local_stream_peer_closed(stream: &mut LocalStream) -> io::Result<bool> {
+    probe_stream_closed(stream)
+}
+
+pub(crate) fn set_local_stream_polling(stream: &mut LocalStream, enabled: bool) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        stream.set_nonblocking(enabled)
+    }
+
+    #[cfg(windows)]
+    {
+        let _ = (stream, enabled);
+        Ok(())
+    }
+}
+
+/// Binds a listener for private terminal traffic. Unix callers restrict the
+/// socket file after binding; Windows must set the named-pipe DACL at creation.
+pub(crate) fn bind_private_local_listener(path: &Path) -> io::Result<PrivateLocalListener> {
+    #[cfg(unix)]
+    {
+        bind_local_listener(path)
+    }
+
+    #[cfg(windows)]
+    {
+        let listener = PrivateLocalListener::bind(path)?;
+        fs::write(path, windows_socket_marker())?;
+        Ok(listener)
+    }
+}
+
+pub(crate) fn poll_local_stream_read(
+    stream: &mut LocalStream,
+    buf: &mut [u8],
+) -> io::Result<LocalStreamRead> {
+    match poll_local_stream_read_count(stream, buf)? {
+        LocalStreamReadCount::Data(read) => {
+            let _ = read;
+            Ok(LocalStreamRead::Data)
+        }
+        LocalStreamReadCount::Pending => Ok(LocalStreamRead::Pending),
+        LocalStreamReadCount::Closed => Ok(LocalStreamRead::Closed),
+    }
+}
+
+pub(crate) fn poll_local_stream_read_count(
+    stream: &mut LocalStream,
+    buf: &mut [u8],
+) -> io::Result<LocalStreamReadCount> {
+    #[cfg(unix)]
+    {
+        match stream.read(buf) {
+            Ok(0) => Ok(LocalStreamReadCount::Closed),
+            Ok(read) => Ok(LocalStreamReadCount::Data(read)),
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                Ok(LocalStreamReadCount::Pending)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        match windows_named_pipe_available(stream)? {
+            None => Ok(LocalStreamReadCount::Closed),
+            Some(0) => Ok(LocalStreamReadCount::Pending),
+            Some(_) => match stream.read(buf) {
+                Ok(0) => Ok(LocalStreamReadCount::Closed),
+                Ok(read) => Ok(LocalStreamReadCount::Data(read)),
+                Err(err) if is_connection_closed_error(&err) => Ok(LocalStreamReadCount::Closed),
+                Err(err) => Err(err),
+            },
+        }
+    }
+}
+
+#[cfg(unix)]
+fn probe_stream_closed(stream: &mut LocalStream) -> io::Result<bool> {
+    stream.set_nonblocking(true)?;
+    let mut probe = [0u8; 1];
+    let status = match stream.read(&mut probe) {
+        Ok(0) => Ok(true),
+        Ok(_) => Ok(true),
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(err) if is_connection_closed_error(&err) => Ok(true),
+        Err(err) => Err(err),
+    };
+    stream.set_nonblocking(false)?;
+    status
+}
+
+#[cfg(windows)]
+fn probe_stream_closed(stream: &mut LocalStream) -> io::Result<bool> {
+    Ok(windows_named_pipe_available(stream)?.is_none())
+}
+
+#[cfg(windows)]
+fn windows_named_pipe_available(stream: &mut LocalStream) -> io::Result<Option<u32>> {
+    use std::os::windows::io::{AsHandle, AsRawHandle};
+
+    let LocalStream::NamedPipe(pipe) = stream;
+    let mut available = 0;
+    let ok = unsafe {
+        windows_sys::Win32::System::Pipes::PeekNamedPipe(
+            pipe.as_handle().as_raw_handle(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            &mut available,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok != 0 {
+        return Ok(Some(available));
+    }
+
+    let err = io::Error::last_os_error();
+    if is_connection_closed_error(&err) || windows_named_pipe_closed_error(&err) {
+        return Ok(None);
+    }
+    Err(err)
+}
+
+pub(crate) fn is_connection_closed_error(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::NotConnected
+            | io::ErrorKind::UnexpectedEof
+            | io::ErrorKind::WriteZero
+    )
+}
+
+#[cfg(windows)]
+fn windows_named_pipe_closed_error(err: &io::Error) -> bool {
+    matches!(err.raw_os_error(), Some(6 | 109 | 232 | 233))
+}
+
+pub(crate) fn socket_file_identity(path: &Path) -> io::Result<SocketFileIdentity> {
+    #[cfg(windows)]
+    {
+        Ok(SocketFileIdentity {
+            marker: fs::read(path)?,
+        })
+    }
+
+    #[cfg(unix)]
+    {
+        let metadata = fs::metadata(path)?;
+        Ok(SocketFileIdentity {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        })
+    }
+}
+
+pub(crate) fn remove_socket_file_if_owned(
+    path: &Path,
+    identity: &SocketFileIdentity,
+) -> io::Result<()> {
+    let current = match socket_file_identity(path) {
+        Ok(current) => current,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+
+    if current != *identity {
+        return Ok(());
+    }
+
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+#[cfg(windows)]
+fn windows_socket_marker() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("{}:{now}", std::process::id())
+}
+
+#[cfg(unix)]
+pub(crate) fn restrict_socket_permissions(path: &Path, mode: u32) -> io::Result<()> {
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(mode);
+    fs::set_permissions(path, permissions)
+}
+
+#[cfg(windows)]
+pub(crate) fn restrict_socket_permissions(_path: &Path, _mode: u32) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn m2_prepare_endpoint_preserves_regular_files_and_symlinks() {
+        use std::os::unix::fs::symlink;
+        let base = std::env::temp_dir().join(format!("lt-m2-ipc-{}", std::process::id()));
+        std::fs::create_dir(&base).unwrap();
+        let regular = base.join("canary");
+        std::fs::write(&regular, b"preserve").unwrap();
+        let link = base.join("link");
+        symlink(&regular, &link).unwrap();
+        for path in [&regular, &link] {
+            assert!(super::prepare_socket_path(path, |_| "busy".into()).is_err());
+        }
+        assert_eq!(std::fs::read(&regular).unwrap(), b"preserve");
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        std::fs::remove_file(link).unwrap();
+        std::fs::remove_file(regular).unwrap();
+        std::fs::remove_dir(base).unwrap();
+    }
+
+    use super::*;
+    #[cfg(windows)]
+    use interprocess::local_socket::traits::Listener as _;
+    #[cfg(windows)]
+    use std::path::PathBuf;
+
+    #[test]
+    fn stale_socket_connect_errors_keep_unix_would_block_strict() {
+        assert!(stale_socket_connect_error(io::ErrorKind::ConnectionRefused));
+        assert!(stale_socket_connect_error(io::ErrorKind::NotFound));
+        assert_eq!(
+            stale_socket_connect_error(io::ErrorKind::TimedOut),
+            cfg!(windows)
+        );
+        assert_eq!(
+            stale_socket_connect_error(io::ErrorKind::WouldBlock),
+            cfg!(windows)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn private_named_pipe_transfers_surface_bursts_without_waiting_for_peer() {
+        use interprocess::local_socket::traits::Stream as _;
+        use std::io::Write as _;
+
+        let path = temp_socket_marker_path("private-pipe");
+        let _ = fs::remove_file(&path);
+        let listener = bind_private_local_listener(&path).unwrap();
+        listener
+            .set_nonblocking(interprocess::local_socket::ListenerNonblockingMode::Accept)
+            .unwrap();
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        let mut client = connect_local_stream(&path).unwrap();
+        let mut server = listener.accept().unwrap();
+        server.set_nonblocking(true).unwrap();
+        client.set_nonblocking(true).unwrap();
+
+        // A screen update must fit before the peer's next poll in either direction.
+        let payload = vec![b'x'; 48 * 1024];
+        let mut received = vec![0; payload.len()];
+        assert_eq!(server.write(&payload).unwrap(), payload.len());
+        client.read_exact(&mut received).unwrap();
+        assert_eq!(received, payload);
+        assert_eq!(client.write(&payload).unwrap(), payload.len());
+        server.read_exact(&mut received).unwrap();
+        assert_eq!(received, payload);
+
+        drop(client);
+        drop(server);
+        drop(listener);
+        let _ = fs::remove_file(path);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn remove_socket_file_if_owned_compares_windows_marker_contents() {
+        let path = temp_socket_marker_path("same-len-marker");
+        let _ = fs::remove_file(&path);
+
+        fs::write(&path, b"marker-aa").expect("write first marker");
+        let identity = socket_file_identity(&path).expect("read first identity");
+        fs::write(&path, b"marker-bb").expect("replace with same-length marker");
+
+        remove_socket_file_if_owned(&path, &identity).expect("remove owned marker");
+
+        assert!(path.exists(), "same-length replacement marker must survive");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn idle_named_pipe_peer_is_not_treated_as_closed() {
+        let path = temp_socket_marker_path("idle-pipe");
+        let listener = bind_local_listener(&path).unwrap();
+        let _client = connect_local_stream(&path).unwrap();
+        let mut server = listener.accept().unwrap();
+
+        assert!(!local_stream_peer_closed(&mut server).unwrap());
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn disconnected_named_pipe_peer_is_treated_as_closed() {
+        let path = temp_socket_marker_path("disconnected-pipe");
+        let listener = bind_local_listener(&path).unwrap();
+        let client = connect_local_stream(&path).unwrap();
+        let mut server = listener.accept().unwrap();
+
+        drop(client);
+
+        assert!(local_stream_peer_closed(&mut server).unwrap());
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[cfg(windows)]
+    fn temp_socket_marker_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("herdr-{name}-{}.sock", std::process::id()))
+    }
+}

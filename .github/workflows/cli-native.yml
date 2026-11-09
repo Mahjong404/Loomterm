@@ -1,0 +1,87 @@
+# Native source, build inputs and test changes run once per PR update or main push.
+# PR #2 validates codex/m2-native through its pull_request event; branch push is
+# intentionally omitted to avoid duplicate Linux/macOS matrices for one commit.
+name: Loomterm Unix native
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/cli-native.yml'
+      - 'apps/loomterm-cli/**'
+      - 'tools/test-unix-native.py'
+      - 'tools/fixtures/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/cli-native.yml'
+      - 'apps/loomterm-cli/**'
+      - 'tools/test-unix-native.py'
+      - 'tools/fixtures/**'
+permissions:
+  contents: read
+concurrency:
+  group: loomterm-m2-native-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            os: Linux
+            arch: x86_64
+            zig: x86_64-linux
+            sha256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+          - runner: macos-15
+            os: Darwin
+            arch: arm64
+            zig: aarch64-macos
+            sha256: b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      EXPECT_OS: ${{ matrix.os }}
+      EXPECT_ARCH: ${{ matrix.arch }}
+      ZIG_PLATFORM: ${{ matrix.zig }}
+      ZIG_SHA256: ${{ matrix.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Assert real native architecture
+        shell: bash
+        run: |
+          test "$(uname -s)" = "$EXPECT_OS"
+          test "$(uname -m)" = "$EXPECT_ARCH"
+          if [ "$EXPECT_OS" = Linux ]; then getconf GNU_LIBC_VERSION; fi
+      - name: Provision pinned user-local tools
+        shell: bash
+        run: |
+          rustup toolchain install 1.96.1 --profile minimal --component rustfmt --component clippy
+          python3 - <<'PY'
+          import hashlib, os, pathlib, tarfile, urllib.request
+          base = pathlib.Path(os.environ['RUNNER_TEMP']) / 'loomterm-zig'
+          base.mkdir()
+          name = 'zig-' + os.environ['ZIG_PLATFORM'] + '-0.16.0.tar.xz'
+          archive = base / name
+          urllib.request.urlretrieve('https://ziglang.org/download/0.16.0/' + name, archive)
+          assert hashlib.sha256(archive.read_bytes()).hexdigest() == os.environ['ZIG_SHA256']
+          with tarfile.open(archive) as source:
+              source.extractall(base, filter='data')
+          with open(os.environ['GITHUB_PATH'], 'a') as paths:
+              paths.write(str(base / name.removesuffix('.tar.xz')) + '\n')
+          PY
+      - name: Build and exercise actual CLI and Daemon
+        shell: bash
+        run: |
+          python3 -B tools/test-unix-native.py --evidence "$RUNNER_TEMP/loomterm-native-evidence"
+      - name: Retain selected synthetic evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-${{ matrix.runner }}
+          path: ${{ runner.temp }}/loomterm-native-evidence/ci-summary.json
+          retention-days: 7
+          if-no-files-found: warn
+      # Raw VT, private research, compiler cache and home directories are never uploaded.

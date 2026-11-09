@@ -1,0 +1,41 @@
+# Loomterm adoption patches
+
+This independent workspace adopts the original TUI/server recorded in
+[UPSTREAM.json](UPSTREAM.json). The root workspace remains the diagnostic and
+regression foundation. Apache-2.0 applies to the adopted code; the repository's
+original MIT license is unchanged. This is a source integration, not a release.
+
+| Patch group | Source locations | Purpose and maintenance surface |
+| --- | --- | --- |
+| Product identity | `src/product.rs`, `config`, `session`, `ipc`, `logging`, `main.rs`, `client/mod.rs` | Dedicated product directories and endpoint hashes; explicit command/API policy; no original-product config, automatic Agent discovery, updater, plugin execution or remote endpoints |
+| Startup and identity | `src/platform/instance_lock.rs`, `server/autodetect`, `server/bootstrap`, API capabilities | Startup lock through both endpoints becoming ready, lifetime owner lock, product/namespace/boot identity before attaching |
+| Unix isolation preparation | `src/platform/macos/launchd_spawn.rs` | Use the Loomterm label/temp prefix so stale-job selection cannot target original Herdr. macOS launchd/bootstrap execution and independent-Root cleanup remain native M2 gates |
+| M2 Unix isolation guards | `src/platform/{unix_paths,launch_namespace}.rs`, `product.rs`, `ipc.rs`, macOS launchd | Validate native socket byte limits before side effects; reject non-socket/symlink/foreign-owned endpoints; private product directories must be owned real directories; scope stale launchd cleanup by runtime Root. Native socket 0600/directory 0700 checks and dual-endpoint lifecycle passed on Linux x64 and macOS arm64; special launchd execution remains Pending |
+| M2 native test entry | `tests/loomterm_native.rs`, repository `tools/test-unix-native.py` and Unix fixtures | Reuse the real outer PTY/TUI host on Unix, ordinary direct-child SIGTERM cleanup, bounded XTVERSION/resize/detach controller; target-native lifecycle/concurrent cold-start and finite exit/Source cases passed on both platforms. No production fixture entry or extra Terminal Owner; remaining signal/descriptor/slow-client/launchd limits stay explicit |
+| M2 native compile closure | `src/update.rs`, Unix-only transport test import, endpoint JSON test assets | Reuse the existing selected-product client endpoint resolver in an inherited Unix compile path; updater/handoff remains disabled by entry policy. Include concat-based compile-time JSON fixtures in source delivery. Remove the observed redundant Unix test trait import; native check/build/link and engine tests passed on both targets; the pinned Clippy baseline is tracked in the helper patch below |
+| M2 pinned Clippy helper | `crates/ghostty-vt/src/lib.rs` | Group width/height into one size argument in an existing private helper and its two callers. Preserve engine/native ABI, pins, image behavior and enforced Clippy rules |
+| M2 lint configuration delivery | `clippy.toml`, repository native test entry | Include the byte-identical pinned upstream configuration (argument threshold 11) in source delivery. Fail before building if absent/changed; check the pinned driver with eleven-argument acceptance and twelve-argument rejection. Keep strict workspace `-D warnings`; no new lint exemptions or function refactors |
+| Shared Windows input | `src/client/input/windows_vti.rs`, `src/client/mod.rs` | Separate nested Win32 UTF-16 state from ASCII wrappers; completed synthetic surrogate pairs become TextCommit. Cover UTF-8 read splits, native/serialized text equivalence, releases, controls and paste framing. Bound the mapped-input handoff to 256 batches/1 MiB retained vector/payload storage; pause console reads at half capacity. Over-admission drains accepted input then reports an error and detaches without ending work. No host/vendor/IPC change |
+| Windows input API control | `src/terminal/runtime/windows_input_tests.rs`, repository `tools/fixtures/cli-input.{c,py}` | Opt-in bounded production-runtime control, no client/Shell/Agent. Verify actual CP65001/mode0x280, loaded ConPTY and process identity. Direct UTF-8 reproduces non-BMP replacement in ConPTY 1.24 ReadFile while wide/record APIs retain the pair. This remains a compatibility failure, not a successful conversion test or a reason to rewrite the PTY actor |
+| Stable project | `workspace`, `app/creation`, `app/api`, `persist`, `server/headless/notifications` | Stable Source Folder/name/identity, metadata-only cold restoration; centralized single Shell refill when clients exist |
+| Bounded I/O | `src/pty`, `pane`, `api/server`, `server/client_transport`, `client/{transport,endpoint/writer,notifications}`, `protocol/{wire,surface_reuse,surface_delta/decode}` | Admission held through actual consumption; separate VT replies; bounded connections, client-frame admission and write deadlines; geometry checked before native/render allocation; explicit failure instead of silent input loss |
+| Native reuse | `crates/ghostty-vt/build.rs`, its manifest, `Cargo.lock` | Optional explicit trusted artifact manifest verifies target, revision, library, headers and bindings. Otherwise retains the pinned source/Zig build |
+| Product packaging boundary | `Cargo.toml`, `build.rs`, tests | Own package/binary, no publishing; upstream integration tests point at the adopted binary. Existing vendor patches remain unchanged |
+
+The vendor Ghostty revision and its pre-existing patches are inherited intact,
+including `vendor/libghostty-vt.vendor.json`. No header or Rust binding is
+regenerated by M1. `vendor/portable-pty` remains the original patched 0.9.0
+source, rather than replacing it with crates.io's identically numbered package.
+Source-level upstream names and historical documentation remain attribution
+and maintenance context; they are not additional supported product entries.
+
+Production changes do not adopt B2's fixture-only entry, fixed case Root,
+deadline shutdown or permanent Shell-refill suppression. The full client still
+uses the original terminal-first interaction and one daemon-owned
+TerminalRuntimeRegistry. Experimental fixtures live outside production entry
+selection. Native test results are maintained in the repository platform and
+lifecycle documents; fixture compilation alone is not interactive acceptance.
+
+For an upstream update, compare against the exact source inventory, retain
+licenses/vendor changes, and review these groups individually. Do not switch
+to the separate Herdr App/Core architecture or replace the engine implicitly.
