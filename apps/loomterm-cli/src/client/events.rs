@@ -12,6 +12,11 @@ pub(super) enum ClientLoopEvent {
     #[cfg(windows)]
     StdinEvents(Vec<crate::protocol::ClientInputEvent>),
     #[cfg(windows)]
+    PasteRejected {
+        size: usize,
+        max: usize,
+    },
+    #[cfg(windows)]
     NotificationActivated(shell::ClientSystemNotificationTarget),
     Resize(u16, u16, u32, u32, bool),
     TerminalUnavailable(io::Error),

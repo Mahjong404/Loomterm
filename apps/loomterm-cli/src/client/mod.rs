@@ -1288,6 +1288,25 @@ async fn run_client_loop(
                 }
                 return Ok(());
             }
+            #[cfg(windows)]
+            ClientLoopEvent::PasteRejected { size, max } => {
+                let message = format!(
+                    "Paste rejected: input is {size} bytes; Loomterm's limit is {max} bytes"
+                );
+                if let Some(shell) = state.shell.as_mut() {
+                    if shell.receive_endpoint_error(message) {
+                        let frame = shell.compose(state.reported_size.0, state.reported_size.1);
+                        if let Some(frame) = frame {
+                            state.present_frame(frame);
+                        }
+                    }
+                } else {
+                    warn!(
+                        size,
+                        max, "paste rejected before client shell became available"
+                    );
+                }
+            }
             ClientLoopEvent::Resize(
                 new_cols,
                 new_rows,

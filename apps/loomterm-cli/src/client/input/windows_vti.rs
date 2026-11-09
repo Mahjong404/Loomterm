@@ -180,16 +180,24 @@ struct WindowsInputTraceBatch {
 #[cfg(windows)]
 #[derive(Default)]
 struct WindowsInputHandoff {
-    pending: VecDeque<Vec<crate::protocol::ClientInputEvent>>,
+    pending: VecDeque<WindowsInputBatch>,
     backpressured: bool,
     queued_bytes: usize,
     failed: bool,
 }
 
 #[cfg(windows)]
+#[derive(Debug, PartialEq)]
+enum WindowsInputBatch {
+    Events(Vec<crate::protocol::ClientInputEvent>),
+    PasteRejected { size: usize, max: usize },
+}
+
+#[cfg(windows)]
 impl WindowsInputHandoff {
     const MAX_BATCHES: usize = 256;
-    const MAX_BYTES: usize = 1024 * 1024;
+    const MAX_BYTES: usize = crate::protocol::MAX_INPUT_PAYLOAD
+        + Self::MAX_BATCHES * std::mem::size_of::<crate::protocol::ClientInputEvent>();
 
     fn batch_bytes(events: &Vec<crate::protocol::ClientInputEvent>) -> usize {
         use crate::protocol::ClientInputEvent;
@@ -226,6 +234,18 @@ impl WindowsInputHandoff {
         if events.is_empty() || self.failed {
             return;
         }
+        if let Some(size) = oversized_paste_payload(&events) {
+            if self.pending.len() >= Self::MAX_BATCHES {
+                self.failed = true;
+                tracing::error!("Windows input backlog exhausted while reporting rejected paste; detaching client after admitted input drains; work remains running");
+                return;
+            }
+            self.pending.push_back(WindowsInputBatch::PasteRejected {
+                size,
+                max: crate::protocol::MAX_INPUT_PAYLOAD,
+            });
+            return;
+        }
         let cost = Self::batch_bytes(&events);
         if self.pending.len() >= Self::MAX_BATCHES
             || cost > Self::MAX_BYTES.saturating_sub(self.queued_bytes)
@@ -238,7 +258,7 @@ impl WindowsInputHandoff {
             self.push_backpressured(events);
         } else {
             self.queued_bytes += cost;
-            self.pending.push_back(events);
+            self.pending.push_back(WindowsInputBatch::Events(events));
         }
     }
 
@@ -265,19 +285,33 @@ impl WindowsInputHandoff {
             }
             match event_tx.try_reserve() {
                 Ok(permit) => {
-                    let Some(events) = self.pending.pop_front() else {
+                    let Some(batch) = self.pending.pop_front() else {
                         continue;
                     };
-                    self.queued_bytes -= Self::batch_bytes(&events);
-                    permit.send(ClientLoopEvent::StdinEvents(events));
+                    match batch {
+                        WindowsInputBatch::Events(events) => {
+                            self.queued_bytes -= Self::batch_bytes(&events);
+                            permit.send(ClientLoopEvent::StdinEvents(events));
+                        }
+                        WindowsInputBatch::PasteRejected { size, max } => {
+                            permit.send(ClientLoopEvent::PasteRejected { size, max });
+                        }
+                    }
                 }
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     if !self.backpressured {
                         self.backpressured = true;
                         let pending = std::mem::take(&mut self.pending);
                         self.queued_bytes = 0;
-                        for events in pending {
-                            self.push_backpressured(events);
+                        for batch in pending {
+                            match batch {
+                                WindowsInputBatch::Events(events) => {
+                                    self.push_backpressured(events);
+                                }
+                                rejection @ WindowsInputBatch::PasteRejected { .. } => {
+                                    self.pending.push_back(rejection);
+                                }
+                            }
                         }
                     }
                     return true;
@@ -288,7 +322,7 @@ impl WindowsInputHandoff {
     }
 
     fn push_backpressured(&mut self, events: Vec<crate::protocol::ClientInputEvent>) {
-        if let Some(previous) = self.pending.back_mut() {
+        if let Some(WindowsInputBatch::Events(previous)) = self.pending.back_mut() {
             if let ([previous_event], [next_event]) = (previous.as_slice(), events.as_slice()) {
                 if windows_mouse_motion_can_replace(previous_event, next_event) {
                     self.queued_bytes -= Self::batch_bytes(previous);
@@ -299,8 +333,16 @@ impl WindowsInputHandoff {
             }
         }
         self.queued_bytes += Self::batch_bytes(&events);
-        self.pending.push_back(events);
+        self.pending.push_back(WindowsInputBatch::Events(events));
     }
+}
+
+#[cfg(windows)]
+fn oversized_paste_payload(events: &[crate::protocol::ClientInputEvent]) -> Option<usize> {
+    let [crate::protocol::ClientInputEvent::Paste { text }] = events else {
+        return None;
+    };
+    (text.len() > crate::protocol::MAX_INPUT_PAYLOAD).then_some(text.len())
 }
 
 #[cfg(windows)]
@@ -2170,7 +2212,13 @@ mod tests {
         push_platform_input_events(Vec::new(), &mut handoff, Some(&mut trace));
 
         assert_eq!(trace.mapped_event_groups, groups);
-        assert_eq!(handoff.pending, VecDeque::from(groups));
+        assert_eq!(
+            handoff.pending,
+            groups
+                .into_iter()
+                .map(WindowsInputBatch::Events)
+                .collect::<VecDeque<_>>()
+        );
     }
 
     #[cfg(windows)]
@@ -2239,7 +2287,7 @@ mod tests {
             expected
                 .iter()
                 .cloned()
-                .map(|event| vec![event])
+                .map(|event| WindowsInputBatch::Events(vec![event]))
                 .collect::<VecDeque<_>>()
         );
         assert!(matches!(event_rx.try_recv(), Ok(ClientLoopEvent::Timer)));
@@ -2681,13 +2729,105 @@ mod tests {
         }
         assert_eq!(admitted, WindowsInputHandoff::MAX_BATCHES);
         assert_eq!(handoff.queued_bytes, 0);
+
+        let mut recovery = WindowsInputHandoff::default();
+        recovery.push(vec![ClientInputEvent::Paste {
+            text: "x".repeat(crate::protocol::MAX_INPUT_PAYLOAD + 1),
+        }]);
+        recovery.push(vec![ClientInputEvent::TextCommit("after paste".into())]);
+        assert!(!recovery.failed, "an oversized paste is recoverable");
+        assert_eq!(recovery.pending.len(), 2);
+        assert!(recovery.try_flush(&tx));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            ClientLoopEvent::PasteRejected {
+                size,
+                max,
+            } if size == crate::protocol::MAX_INPUT_PAYLOAD + 1
+                && max == crate::protocol::MAX_INPUT_PAYLOAD
+        ));
+        assert!(recovery.try_flush(&tx));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            ClientLoopEvent::StdinEvents(events)
+                if events == [ClientInputEvent::TextCommit("after paste".into())]
+        ));
+        assert_eq!(recovery.queued_bytes, 0);
+
+        let mut boundary = WindowsInputHandoff::default();
+        boundary.push(vec![ClientInputEvent::Paste {
+            text: "x".repeat(crate::protocol::MAX_INPUT_PAYLOAD),
+        }]);
+        assert!(
+            !boundary.failed,
+            "the protocol payload limit remains admissible"
+        );
+        assert_eq!(boundary.pending.len(), 1);
+        assert!(matches!(
+            boundary.pending.front(),
+            Some(WindowsInputBatch::Events(events))
+                if matches!(events.as_slice(), [ClientInputEvent::Paste { text }]
+                    if text.len() == crate::protocol::MAX_INPUT_PAYLOAD)
+        ));
+
         let mut large = WindowsInputHandoff::default();
         large.push(vec![ClientInputEvent::Paste {
-            text: "x".repeat(WindowsInputHandoff::MAX_BYTES + 1),
+            text: "x".repeat(crate::protocol::MAX_INPUT_PAYLOAD + 1),
         }]);
-        assert!(large.failed);
-        assert!(large.pending.is_empty());
+        assert!(!large.failed);
+        assert!(matches!(
+            large.pending.as_slices().0,
+            [WindowsInputBatch::PasteRejected {
+                size,
+                max,
+            }] if *size == crate::protocol::MAX_INPUT_PAYLOAD + 1
+                && *max == crate::protocol::MAX_INPUT_PAYLOAD
+        ));
         assert_eq!(large.queued_bytes, 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn vti_oversized_bracketed_paste_recovers_on_same_input_handoff() {
+        use crate::protocol::ClientInputEvent;
+
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut pump = WindowsInputPump::default();
+        let mut handoff = WindowsInputHandoff::default();
+        let large_text = "x".repeat(1_225_008);
+        let recovery_text = format!("界😀\n\r{}", "x".repeat(301 - "界😀\n\r".len()));
+        let mut wire = b"\x1b[200~".to_vec();
+        wire.extend_from_slice(large_text.as_bytes());
+        wire.extend_from_slice(b"\x1b[201~");
+        for chunk in wire.chunks(8_000) {
+            let events = pump.process(PlatformInputItem::Bytes(chunk.to_vec()));
+            handoff.push(events);
+            assert!(!handoff.failed);
+        }
+        assert_eq!(handoff.pending.len(), 1);
+        assert_eq!(handoff.queued_bytes, 0);
+        assert!(handoff.try_flush(&tx));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            ClientLoopEvent::PasteRejected { size, max }
+                if size == large_text.len() && max == crate::protocol::MAX_INPUT_PAYLOAD
+        ));
+
+        let mut recovery_wire = b"\x1b[200~".to_vec();
+        recovery_wire.extend_from_slice(recovery_text.as_bytes());
+        recovery_wire.extend_from_slice(b"\x1b[201~");
+        for chunk in recovery_wire.chunks(7) {
+            handoff.push(pump.process(PlatformInputItem::Bytes(chunk.to_vec())));
+            assert!(!handoff.failed);
+        }
+        assert!(handoff.try_flush(&tx));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            ClientLoopEvent::StdinEvents(events)
+                if matches!(events.as_slice(), [ClientInputEvent::Paste { text }]
+                    if text == &recovery_text)
+        ));
+        assert_eq!(handoff.queued_bytes, 0);
     }
 
     #[test]
