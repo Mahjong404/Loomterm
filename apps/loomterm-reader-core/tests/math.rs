@@ -9,6 +9,7 @@ fn offline_inline_display_and_common_math_produce_real_rgba() {
         r"\sum_{i=1}^{n}i=\frac{n(n+1)}{2}",
         r"\int_0^\infty e^{-x}\,dx=1",
         r"\begin{pmatrix}a&b\\c&d\end{pmatrix}",
+        r"\begin{aligned}a&=b+c\\d&=\sqrt{x}\end{aligned}",
         r"\alpha+\beta=\theta",
         r"\text{hello world}",
     ] {
@@ -234,12 +235,89 @@ fn formula_raster_reflows_only_its_current_private_resource_ticket() {
     };
     assert!(view.resource_size(ticket, size).unwrap());
     assert!(!view.is_current_frame(&first));
-    view.resize(Viewport::new(20, 20).unwrap()).unwrap();
-    assert!(view.frame(&cancel).unwrap().resources.is_empty());
+    for columns in [20, 48, 12, 40] {
+        let before_resize = view.frame(&cancel).unwrap();
+        view.resize(Viewport::new(columns, 20).unwrap()).unwrap();
+        assert!(!view.is_current_frame(&before_resize));
+        let after_resize = view.frame(&cancel).unwrap();
+        assert!(after_resize.resources.is_empty());
+        assert_eq!(
+            view.resource_status(ticket.node),
+            Some(ResourceStatus::Ready(size))
+        );
+        assert!(after_resize.lines.iter().any(|line| {
+            line.clusters
+                .iter()
+                .any(|cluster| cluster.resource == Some(ticket.node))
+        }));
+    }
     fs::write(&path, "$$x^2$$\n").unwrap();
     let refresh = view.refresh().unwrap().unwrap();
     assert_eq!(view.apply(refresh.execute()), ViewApply::Ready);
     assert!(!view.resource_size(ticket, size).unwrap());
     view.close();
     assert_eq!(view.resource_size(ticket, size), Err(ViewError::NoDocument));
+}
+
+#[test]
+fn invalid_display_math_keeps_source_and_exposes_failure_to_host() {
+    use loomterm_reader_core::{view::*, Limits, NodeKind};
+    use std::{fs, path::PathBuf};
+    struct Fixture(PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let fixture = Fixture(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/math-fixtures")
+            .join(format!("invalid-{}", std::process::id())),
+    );
+    fs::create_dir_all(&fixture.0).unwrap();
+    let source = "$$\\unknown$$\n";
+    let path = fixture.0.join("invalid.md");
+    fs::write(&path, source).unwrap();
+    let mut view = ReaderView::new(
+        Limits::default(),
+        ViewLimits::default(),
+        Viewport::new(30, 10).unwrap(),
+    )
+    .unwrap();
+    let request = view.open(&path).unwrap();
+    assert_eq!(view.apply(request.execute()), ViewApply::Ready);
+    let cancel = Cancellation::default();
+    let frame = view.frame(&cancel).unwrap();
+    let ticket = frame
+        .resources
+        .iter()
+        .find(|r| r.kind == ResourceKind::Math)
+        .unwrap()
+        .ticket
+        .clone();
+    let formula = match &frame.projection.document.content.nodes[ticket.node].kind {
+        NodeKind::Math { source, .. } => source,
+        other => panic!("unexpected node: {other:?}"),
+    };
+    assert_eq!(
+        render_math(
+            formula,
+            true,
+            MathOptions::default(),
+            MathLimits::default(),
+            &cancel,
+        )
+        .unwrap_err(),
+        MathError::Unsupported
+    );
+    assert!(view
+        .resource_failed(&ticket, ResourceFailure::Unsupported)
+        .unwrap());
+    assert_eq!(
+        view.resource_status(ticket.node),
+        Some(ResourceStatus::Failed(ResourceFailure::Unsupported))
+    );
+    assert!(view.frame(&cancel).unwrap().resources.is_empty());
+    assert_eq!(frame.projection.document.content.source, source);
+    view.close();
 }

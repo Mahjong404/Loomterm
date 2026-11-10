@@ -13,6 +13,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("inline", "E=mc^2", false),
         ("fraction", r"\frac{-b\pm\sqrt{b^2-4ac}}{2a}", true),
         ("matrix", r"\begin{pmatrix}a&b\\c&d\end{pmatrix}", true),
+        (
+            "aligned",
+            r"\begin{aligned}a&=b+c\\d&=\sqrt{x}\end{aligned}",
+            true,
+        ),
     ] {
         let result = render_math(
             source,

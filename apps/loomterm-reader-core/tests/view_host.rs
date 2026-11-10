@@ -795,6 +795,97 @@ fn fractional_pointer_selection_crosses_lines_without_splitting_graphemes() {
 }
 
 #[test]
+fn replacing_file_discards_old_selection_search_hit_and_frame() {
+    let mut host = MockHost::open("# First\n\nA中e\u{301} old\n", 20, 8);
+    let cancel = Cancellation::default();
+    let old_frame = host.frame();
+    let old_projection = host.view.projection().unwrap().clone();
+    let old_hit = old_projection.search("old", 1, &cancel).unwrap().remove(0);
+    let source = &old_projection.document.content.source;
+    let start = source.find('中').unwrap();
+    let end = source.find(" old").unwrap();
+    host.view
+        .input(Input::Select { start, end }, &cancel)
+        .unwrap();
+    assert_eq!(host.view.selection(), Some("中e\u{301}"));
+
+    let stale_reload = host.view.refresh().unwrap().unwrap();
+    let replacement = host.file.with_file_name("second.md");
+    fs::write(&replacement, "# Second\n\nnew body\n").unwrap();
+    let new_load = host.view.open(&replacement).unwrap();
+    assert!(host.view.selection().is_none());
+    assert!(!host.view.is_current_frame(&old_frame));
+    assert_eq!(host.view.apply(stale_reload.execute()), ViewApply::Stale);
+    assert_eq!(host.view.apply(new_load.execute()), ViewApply::Ready);
+    assert!(host.view.selection().is_none());
+    assert_eq!(
+        host.view.locate_search(&old_hit, &cancel),
+        Err(ViewError::InvalidPosition)
+    );
+    let new_frame = host.frame();
+    assert!(new_frame
+        .lines
+        .iter()
+        .flat_map(|line| &line.clusters)
+        .any(|cluster| new_frame.text(cluster) == "n"));
+    assert_eq!(new_frame.projection.document.path, replacement);
+}
+
+#[test]
+fn pointer_copy_uses_exact_link_text_boundaries_and_source_markup() {
+    let source = "# 标题\n\n**粗体** e\u{301} [中文](#标题)\n";
+    let mut host = MockHost::open(source, 30, 8);
+    let frame = host.frame();
+    let point = |needle: &str, fraction: f64| {
+        let (line, cluster) = frame
+            .lines
+            .iter()
+            .find_map(|line| {
+                line.clusters
+                    .iter()
+                    .find(|cluster| frame.text(cluster) == needle)
+                    .map(|cluster| (line, cluster))
+            })
+            .unwrap();
+        frame
+            .source_point_at(
+                f64::from(cluster.x) + f64::from(cluster.width) * fraction,
+                f64::from(line.y) + 0.5,
+            )
+            .unwrap()
+    };
+    let start = point("中", 0.25);
+    let end = point("文", 0.75);
+    let markup_start = point("粗", 0.25);
+    assert!(start.exact && end.exact);
+    host.view
+        .input(
+            Input::Select {
+                start: start.byte,
+                end: end.byte,
+            },
+            &Cancellation::default(),
+        )
+        .unwrap();
+    assert_eq!(host.view.selection(), Some("中文"));
+
+    host.view
+        .input(
+            Input::Select {
+                start: markup_start.byte,
+                end: end.byte,
+            },
+            &Cancellation::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        host.view.selection(),
+        Some(&source[markup_start.byte..end.byte])
+    );
+    assert!(host.view.selection().unwrap().contains("** e\u{301} ["));
+}
+
+#[test]
 fn horizontal_reading_keeps_short_rows_visible_and_reverses_at_the_edge() {
     let wide = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     let mut host = MockHost::open(
