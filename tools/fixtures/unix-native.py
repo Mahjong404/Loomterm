@@ -342,16 +342,23 @@ def m5_multi_client_viewport(case, first, second):
     assert f'M5NEW_{token}' in second.command()['screen']
 
     case.result['phase'] = 'm5-finite-eviction'
-    second.text(f"for ((i=0;i<500;i++)); do printf 'M5E_{token}_%03d_%064d\\n' \"$i\" 0; done\r")
-    second.visible(f'M5E_{token}_499')
+    # The byte limit is page-granular; 500 rows can fit without any eviction.
+    second.text(f"for ((i=0;i<3000;i++)); do printf 'M5E_{token}_%03d_%064d\\n' \"$i\" 0; done\r")
+    case.result['phase'] = 'm5-finite-eviction-tail'
+    second.visible(f'M5E_{token}_2999')
+    case.result['phase'] = 'm5-finite-eviction-reader'
     wait_for(lambda: f'M5E_{token}_' in first.command()['screen'])
     assert f'M5H_{token}_{anchor:03d}' not in first.command()['screen']
-    assert f'M5E_{token}_499' in second.command()['screen']
-    for _ in range(24):
+    assert f'M5E_{token}_2999' in second.command()['screen']
+    case.result['phase'] = 'm5-finite-eviction-return'
+    # Repeated page-down advances through however many complete pages survived.
+    for _ in range(120):
+        if f'M5E_{token}_2999' in first.command()['screen']:
+            break
         first.text('\x1b[6~')
-    first.visible(f'M5E_{token}_499')
+    first.visible(f'M5E_{token}_2999')
     case.record('m5_viewport', anchor=anchor, finite_scrollback_bytes=16384,
-                first_rows=20, second_tail=f'M5E_{token}_499')
+                first_rows=20, second_tail=f'M5E_{token}_2999')
 
 
 def acceptance(case, concurrent):

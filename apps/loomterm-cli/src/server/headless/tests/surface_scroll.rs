@@ -661,6 +661,113 @@ async fn retained_pane_patches_fall_back_when_a_client_reads_history() {
 }
 
 #[tokio::test]
+async fn finite_scrollback_eviction_projects_surviving_rows_to_history_reader() {
+    let (mut server, _control_rx, _render_rx, pane_id) = retained_test_server_with_control(b"");
+    let history = (0..120)
+        .map(|n| format!("M5H_{n:03}\r\n"))
+        .collect::<String>();
+    server.app.state.workspaces[0].insert_test_runtime(
+        pane_id,
+        crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
+            80,
+            24,
+            16 * 1024,
+            history.as_bytes(),
+        ),
+    );
+    server.app.state.ensure_test_terminals();
+    let metrics = server
+        .app
+        .state
+        .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+        .unwrap()
+        .scroll_metrics()
+        .unwrap();
+    assert!(metrics.max_offset_from_bottom >= 40);
+    server
+        .clients
+        .get_mut(&1)
+        .unwrap()
+        .set_pane_scroll_view(pane_id, 40, metrics);
+    let (writer, _control_rx_second, _render_rx_second) = test_client_writer();
+    server.clients.insert(
+        2,
+        ClientConnection::new(
+            (80, 24),
+            crate::kitty_graphics::HostCellSize::default(),
+            2,
+            RenderEncoding::SemanticFrame,
+            Some(writer),
+        ),
+    );
+    let target = Some(crate::ui::TabSurfaceTarget {
+        workspace_index: 0,
+        tab_index: 0,
+    });
+    let graphics = crate::kitty_graphics::surface::DeliveryCache::default();
+    let project = |server: &mut HeadlessServer, client_id| {
+        let views = &mut server
+            .clients
+            .get_mut(&client_id)
+            .unwrap()
+            .pane_scroll_views;
+        crate::server::client_shell::render_pane_surface(
+            &mut server.app,
+            target,
+            Rect::new(0, 0, 80, 24),
+            false,
+            false,
+            crate::kitty_graphics::HostCellSize::default(),
+            &graphics,
+            client_id,
+            views,
+        )
+        .unwrap()
+    };
+    assert!(frame_text(&project(&mut server, 1).frame).contains("M5H_"));
+    assert!(frame_text(&project(&mut server, 2).frame).contains("M5H_119"));
+
+    // Ghostty's page-granular byte limit can retain more than 500 compact rows.
+    let first_wave = (0..500)
+        .map(|n| format!("M5E_{n:03}_{:064}\r\n", 0))
+        .collect::<String>();
+    write_shared_test_pane(&mut server, pane_id, first_wave.as_bytes());
+    let before_eviction = project(&mut server, 1);
+    assert!(
+        frame_text(&before_eviction.frame).contains("M5H_"),
+        "500 rows did not cross the engine's page-granular eviction threshold"
+    );
+    assert!(frame_text(&project(&mut server, 2).frame).contains("M5E_499"));
+
+    let second_wave = (500..3_000)
+        .map(|n| format!("M5E_{n:03}_{:064}\r\n", 0))
+        .collect::<String>();
+    write_shared_test_pane(&mut server, pane_id, second_wave.as_bytes());
+    let after_eviction = server
+        .app
+        .state
+        .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+        .unwrap()
+        .scroll_metrics()
+        .unwrap();
+    assert!(
+        after_eviction.max_offset_from_bottom < 120 + 3_000 - 24,
+        "the fixture must actually evict history"
+    );
+    let first = project(&mut server, 1);
+    let second = project(&mut server, 2);
+    assert!(
+        frame_text(&first.frame).contains("M5E_"),
+        "reader scroll={:?}, tail scroll={:?}",
+        first.panes[0].scroll,
+        second.panes[0].scroll
+    );
+    assert!(!frame_text(&first.frame).contains("M5H_"));
+    assert!(frame_text(&second.frame).contains("M5E_2999"));
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
 async fn retained_pane_patches_fall_back_for_a_shorter_live_client() {
     let (mut server, _control_rx, render_rx, pane_id) =
         scrollback_test_server_sized(35, &scrolling_lines(0..90));
