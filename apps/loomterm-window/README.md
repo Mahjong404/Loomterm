@@ -258,7 +258,7 @@ step lacks cached `async-broadcast` 0.7.2; M5 owns its independent CLI build.
 ## Reader native window (developer entry)
 
 The Window crate pins Reader Core revision
-[`7e11dcca`](https://github.com/Mahjong404/Loomterm/tree/7e11dcca3c59deb87545c75ec4f387f95e09004e/apps/loomterm-reader-core)
+[`f9264e65`](https://github.com/Mahjong404/Loomterm/tree/f9264e6501541a863e6fcefc36e1d19a8f8027ed/apps/loomterm-reader-core)
 from M4. `ReaderHost` owns one logical preview slot per Window client, bounds
 loading to one active worker plus one replaceable pending request, rejects stale
 generations, forwards viewport/input changes and resource-size/failure callbacks,
@@ -287,14 +287,24 @@ Reader search; Enter locates the first match, F3/Shift+F3 cycles matches, and
 the current source span is highlighted. The query is limited to 256 UTF-8
 bytes and 128 returned hits; one cancellable worker and one replaceable pending
 query are held per Reader HWND. Refresh and close invalidate results. Formula
-resources, wide-character right-half selection and physical-device wheel remain
-Pending. F5 explicitly reopens the same Markdown so
+resources, physical-device selection and wheel remain Pending. Selection maps
+fractional cell coordinates through `Frame::source_point_at`, including a wide
+character's right half; a drag outside the viewport clamps to its visible edge.
+The actual hardware and Clipboard result still needs native acceptance. F5
+explicitly reopens the same Markdown so
 a changed local image refreshes even when the text did not change; it resets
 Reader's scroll position. The exact fixed Reader commit was fetched once into
 an isolated M3 repository and checked by full SHA; no shared branch moved.
 The terminal Window and its M3 acceptance remain independent. Reader Core's MIT license and
 dependency notices remain with that exact source revision; no Reader binaries
 or source snapshot are copied into this branch.
+
+The fixed `f9264e65` source was checked against its Git SHA in an isolated
+cache. Its production Reader code matches the earlier `8989eb86` native
+candidate; the subsequent changes only affect Reader tests/examples. Rust
+1.96.1 Window metadata, fmt, all-target check, 15 tests, strict Clippy and
+build pass with the exact Git dependency. Formula rasterization is an
+isolated default-off Reader prototype, not a Window runtime dependency.
 
 The private native Win32 fixture opens the actual Reader HWND, captures painted
 Markdown, resizes and sends a bounded wheel event, closes Reader via SC_CLOSE,

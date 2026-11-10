@@ -2,7 +2,7 @@
 
 The separate Loomterm-owned launcher now has an optional native Reader HWND
 behind `--reader-file`. This adds no WezTerm adapter patch and keeps the fixed
-Reader Core dependency at `7e11dcca3c59deb87545c75ec4f387f95e09004e`.
+Reader Core dependency at `f9264e6501541a863e6fcefc36e1d19a8f8027ed`.
 GDI draws text clusters and bounded local image pixels from Core frames; DPI,
 resize, wheel, key navigation,
 selection copy and SC_CLOSE stay in the Window process. A native fixture proved
@@ -172,8 +172,12 @@ also accepts standard WM_COPY for its existing selection. These are Window
 source changes, not a fourth WezTerm adapter patch or a second Reader model.
 Rust 1.96.1 MSVC fmt/check/15 tests/strict Clippy pass. Posted HWND wheel
 behavior passes; physical-device input and exact Reader Clipboard copy remain
-Pending. A newer Reader Core precision API was exercised in a separate local
-source copy but is not yet the public Cargo pin.
+Pending. The frozen Reader Core precision API is now the public Cargo pin:
+the Window maps fractional pixel/cell positions to source bytes using
+`Frame::source_point_at`, checks the current paint-frame revision and clamps
+dragging outside the visible viewport. The exact f926 Git dependency passed
+Rust 1.96.1 Window fmt/check/15 tests/strict Clippy/build. Physical selection
+and copied-source accuracy are still Pending; this is not a new WezTerm patch.
 
 The CLI's app-local ConPTY 1.24 bundle preserves inner Kitty APC. The outer
 WezTerm host retains ConPTY 1.22. With only the outer DLL pair changed, a

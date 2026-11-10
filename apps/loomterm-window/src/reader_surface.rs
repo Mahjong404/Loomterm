@@ -951,24 +951,30 @@ impl State {
         }
     }
 
-    fn hit(&mut self, lparam: LPARAM) -> Option<usize> {
-        let x = (lparam as i16 as i32 - self.margin) / self.cell_width;
-        let y = ((lparam >> 16) as i16 as i32 - self.margin) / self.row_height;
-        if x < 0 || y < 0 {
-            return None;
-        }
+    fn hit(&mut self, lparam: LPARAM, dragging: bool) -> Option<usize> {
+        let x = f64::from(lparam as i16 as i32 - self.margin) / f64::from(self.cell_width);
+        let y = f64::from((lparam >> 16) as i16 as i32 - self.margin) / f64::from(self.row_height);
         self.reader.frame(&Cancellation::default()).ok()??;
-        self.reader
-            .current_paint_frame()?
-            .hit_test(x as u16, y as u16)
-            .map(|c| c.source.bytes.start)
+        // current_paint_frame checks the Reader Core revision before mapping
+        // pixels to source bytes. Dragging beyond a captured window clamps to
+        // its visible edge; an initial click outside remains unselected.
+        let frame = self.reader.current_paint_frame()?;
+        let (x, y) = if dragging {
+            (
+                x.clamp(0.0, f64::from(frame.viewport.columns) - 0.001),
+                y.clamp(0.0, f64::from(frame.viewport.rows) - 0.001),
+            )
+        } else {
+            (x, y)
+        };
+        frame.source_point_at(x, y).map(|point| point.byte)
     }
 
     unsafe fn select_to(&mut self, hwnd: HWND, lparam: LPARAM) {
         let Some(start) = self.selection_start else {
             return;
         };
-        let Some(end) = self.hit(lparam) else {
+        let Some(end) = self.hit(lparam, true) else {
             return;
         };
         unsafe {
@@ -1097,7 +1103,7 @@ unsafe extern "system" fn window_proc(
                 SetFocus(hwnd);
                 SetCapture(hwnd);
             }
-            state.selection_start = state.hit(lparam);
+            state.selection_start = state.hit(lparam, false);
             0
         }
         WM_MOUSEMOVE if state.selection_start.is_some() && (wparam & 1) != 0 => {
