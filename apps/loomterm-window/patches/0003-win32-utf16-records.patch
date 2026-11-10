@@ -1,0 +1,58 @@
+--- a/wezterm-input-types/src/lib.rs
++++ b/wezterm-input-types/src/lib.rs
+@@ -1692,11 +1692,19 @@
+         match &self.key {
+             KeyCode::Composed(_) => None,
+             KeyCode::Char(c) => {
+-                let uni = self.win32_uni_char.unwrap_or(*c) as u32;
+-                Some(format!(
+-                    "\u{1b}[{};{};{};{};{};{}_",
+-                    vkey, scan_code, uni, key_down, control_key_state, self.repeat_count
+-                ))
++                // WM_CHAR has no physical VK: upstream may carry its UTF-16
++                // unit in raw_code. Use VK=0 so clients decode it as text.
++                let vkey = if vkey > 0xff && scan_code == 0 { 0 } else { vkey };
++                // KEY_EVENT_RECORD carries UTF-16, including surrogate pairs.
++                let mut units = [0u16; 2];
++                let mut encoded = String::new();
++                for uni in self.win32_uni_char.unwrap_or(*c).encode_utf16(&mut units) {
++                    encoded.push_str(&format!(
++                        "\u{1b}[{};{};{};{};{};{}_",
++                        vkey, scan_code, uni, key_down, control_key_state, self.repeat_count
++                    ));
++                }
++                Some(encoded)
+             }
+             _ => {
+                 let uni = 0;
+@@ -3273,3 +3281,30 @@
+         );
+     }
+ }
++
++#[cfg(all(test, windows))]
++mod loomterm_win32_utf16_tests {
++    use super::*;
++    #[test]
++    fn non_bmp_scalar_uses_two_utf16_records_and_bmp_is_unchanged() {
++        let mut key = KeyEvent {
++            key: KeyCode::Char('中'), modifiers: Modifiers::NONE,
++            leds: KeyboardLedStatus::empty(), repeat_count: 1,
++            key_is_down: true, win32_uni_char: None,
++            raw: Some(RawKeyEvent {
++                key: KeyCode::RawCode(231), phys_code: None, raw_code: 231,
++                scan_code: 0, modifiers: Modifiers::NONE,
++                leds: KeyboardLedStatus::empty(), repeat_count: 1,
++                key_is_down: true, handled: Handled::new(),
++            }),
++        };
++        assert_eq!(key.encode_win32_input_mode().unwrap(), "\x1b[231;0;20013;1;0;1_");
++        key.key = KeyCode::Char('😀');
++        assert_eq!(key.encode_win32_input_mode().unwrap(),
++                   "\x1b[231;0;55357;1;0;1_\x1b[231;0;56832;1;0;1_");
++        key.raw.as_mut().unwrap().raw_code = 56832;
++        let esc = 27 as char;
++        assert_eq!(key.encode_win32_input_mode().unwrap(),
++                   format!("{esc}[0;0;55357;1;0;1_{esc}[0;0;56832;1;0;1_"));
++    }
++}
