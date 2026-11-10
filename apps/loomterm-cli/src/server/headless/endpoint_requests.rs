@@ -77,6 +77,15 @@ impl HeadlessServer {
             return false;
         }
 
+        if let api::schema::Method::PaneScroll(params) = &request.method {
+            return self.handle_client_shell_pane_scroll(
+                client_id,
+                boot_id,
+                request_id,
+                params.clone(),
+            );
+        }
+
         let api_request_id = format!(
             "endpoint:{}:{client_id}:{request_id}",
             self.client_shell_boot_id
@@ -137,5 +146,67 @@ impl HeadlessServer {
         };
         let foreground_changed = self.promote_client_to_foreground(client_id);
         foreground_changed | self.handle_client_shell_api_request(client_id, message)
+    }
+
+    fn handle_client_shell_pane_scroll(
+        &mut self,
+        client_id: u64,
+        boot_id: String,
+        request_id: String,
+        params: api::schema::PaneScrollParams,
+    ) -> bool {
+        let Some((pane_id, mut pane, metrics)) = self.app.client_pane_scroll_info(&params.pane_id)
+        else {
+            self.send_to_client(
+                client_id,
+                crate::server::client_commands::error_message(
+                    boot_id,
+                    request_id,
+                    "pane_not_found",
+                    format!("pane {} is not available", params.pane_id),
+                ),
+            );
+            return false;
+        };
+        let Some((workspace_index, _)) = self.app.parse_pane_id(&params.pane_id) else {
+            return false;
+        };
+        if !self.shell_client_views_pane(client_id, workspace_index, pane_id) {
+            self.send_to_client(
+                client_id,
+                crate::server::client_commands::error_message(
+                    boot_id,
+                    request_id,
+                    "pane_not_visible",
+                    "this client is not viewing the targeted pane",
+                ),
+            );
+            return false;
+        }
+        let metrics = metrics.for_client_rows(
+            self.shell_client_pane_viewport_rows(client_id, pane_id)
+                .unwrap_or(metrics.viewport_rows),
+        );
+        let requested = usize::try_from(params.offset_from_bottom).unwrap_or(usize::MAX);
+        let Some(client) = self.clients.get_mut(&client_id) else {
+            return false;
+        };
+        let metrics = client.set_pane_scroll_view(pane_id, requested, metrics);
+        pane.scroll = Some(api::schema::PaneScrollInfo {
+            offset_from_bottom: metrics.offset_from_bottom as u64,
+            max_offset_from_bottom: metrics.max_offset_from_bottom as u64,
+            viewport_rows: metrics.viewport_rows as u64,
+        });
+        client.request_recompute();
+        self.app.render_dirty.request_generic();
+        self.send_to_client(
+            client_id,
+            crate::server::client_commands::success_message_with_result(
+                boot_id,
+                request_id,
+                api::schema::ResponseResult::PaneInfo { pane },
+            ),
+        );
+        true
     }
 }

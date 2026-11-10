@@ -56,6 +56,24 @@ pub struct ScrollMetrics {
     pub viewport_rows: usize,
 }
 
+impl ScrollMetrics {
+    /// A smaller ClientShell still reads the same buffer; its viewport includes
+    /// the rows hidden below the larger terminal owner's current screen crop.
+    pub(crate) fn for_client_rows(self, requested_rows: usize) -> Self {
+        if self.viewport_rows == 0 {
+            return self;
+        }
+        let rows = requested_rows.clamp(1, self.viewport_rows);
+        Self {
+            max_offset_from_bottom: self
+                .max_offset_from_bottom
+                .saturating_add(self.viewport_rows - rows),
+            viewport_rows: rows,
+            ..self
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct TerminalTextPoint {
     pub row: u32,
@@ -553,6 +571,17 @@ impl PaneTerminal {
         self.ghostty.render(frame, area, show_cursor);
     }
 
+    pub(crate) fn render_at_scroll_offset(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        show_cursor: bool,
+        offset_from_bottom: usize,
+    ) {
+        self.ghostty
+            .render_at_scroll_offset(frame, area, show_cursor, offset_from_bottom);
+    }
+
     pub fn collect_dirty_patch(
         &self,
         area_width: u16,
@@ -563,6 +592,24 @@ impl PaneTerminal {
 
     pub fn visible_hyperlinks(&self, area: Rect) -> Vec<((u16, u16), String, String)> {
         self.ghostty.visible_hyperlinks(area)
+    }
+
+    pub(crate) fn visible_hyperlinks_at_scroll_offset(
+        &self,
+        area: Rect,
+        offset_from_bottom: usize,
+    ) -> Vec<((u16, u16), String, String)> {
+        self.ghostty
+            .visible_hyperlinks_at_scroll_offset(area, offset_from_bottom)
+    }
+
+    pub(crate) fn cursor_state_at_scroll_offset(
+        &self,
+        offset_from_bottom: usize,
+        visible_rows: u16,
+    ) -> Option<TerminalCursorState> {
+        self.ghostty
+            .cursor_state_at_scroll_offset(offset_from_bottom, visible_rows)
     }
 
     pub(crate) fn link_regions_at(
@@ -591,6 +638,23 @@ impl PaneTerminal {
     {
         self.ghostty
             .kitty_image_placements_with_data_filter(needs_data)
+    }
+
+    pub(crate) fn kitty_image_placements_at_scroll_offset_with_data_filter<F>(
+        &self,
+        offset_from_bottom: usize,
+        visible_rows: u16,
+        needs_data: F,
+    ) -> Vec<crate::ghostty::KittyImagePlacement>
+    where
+        F: FnMut(crate::ghostty::KittyImageDescriptor) -> bool,
+    {
+        self.ghostty
+            .kitty_image_placements_at_scroll_offset_with_data_filter(
+                offset_from_bottom,
+                visible_rows,
+                needs_data,
+            )
     }
 
     pub(crate) fn kitty_image_fingerprints(&self, image_ids: &[u32]) -> Vec<Option<u64>> {
@@ -2056,6 +2120,19 @@ impl GhosttyPaneTerminal {
         effective_cursor_state(&mut core, current)
     }
 
+    pub fn cursor_state_at_scroll_offset(
+        &self,
+        offset_from_bottom: usize,
+        visible_rows: u16,
+    ) -> Option<TerminalCursorState> {
+        self.with_client_viewport(offset_from_bottom, visible_rows, |core, row_skip| {
+            let current = current_cursor_state(core);
+            let mut cursor = effective_cursor_state(core, current)?;
+            cursor.y = cursor.y.checked_sub(row_skip)?;
+            Some(cursor)
+        })?
+    }
+
     pub fn synchronized_output_active(&self) -> bool {
         self.core
             .lock()
@@ -2371,6 +2448,17 @@ impl GhosttyPaneTerminal {
             .unwrap_or_default()
     }
 
+    pub fn visible_hyperlinks_at_scroll_offset(
+        &self,
+        area: Rect,
+        offset_from_bottom: usize,
+    ) -> Vec<((u16, u16), String, String)> {
+        self.with_client_viewport(offset_from_bottom, area.height, |core, row_skip| {
+            ghostty_visible_hyperlinks_from_row(core, area, row_skip).unwrap_or_default()
+        })
+        .unwrap_or_default()
+    }
+
     pub(crate) fn kitty_graphics_may_have_placements(&self) -> bool {
         self.core
             .lock()
@@ -2397,6 +2485,31 @@ impl GhosttyPaneTerminal {
             .unwrap_or_default()
     }
 
+    pub(crate) fn kitty_image_placements_at_scroll_offset_with_data_filter<F>(
+        &self,
+        offset_from_bottom: usize,
+        visible_rows: u16,
+        needs_data: F,
+    ) -> Vec<crate::ghostty::KittyImagePlacement>
+    where
+        F: FnMut(crate::ghostty::KittyImageDescriptor) -> bool,
+    {
+        self.with_client_viewport(offset_from_bottom, visible_rows, |core, row_skip| {
+            let mut placements = core
+                .terminal
+                .kitty_image_placements_with_data_filter(needs_data)
+                .unwrap_or_default();
+            for placement in &mut placements {
+                placement.render.viewport_row = placement
+                    .render
+                    .viewport_row
+                    .saturating_sub(i32::from(row_skip));
+            }
+            placements
+        })
+        .unwrap_or_default()
+    }
+
     pub(crate) fn kitty_image_fingerprints(&self, image_ids: &[u32]) -> Vec<Option<u64>> {
         self.core
             .lock()
@@ -2409,6 +2522,56 @@ impl GhosttyPaneTerminal {
         let Ok(mut core) = self.core.lock() else {
             return;
         };
+        Self::render_locked(&mut core, frame, area, show_cursor, 0);
+    }
+
+    pub fn render_at_scroll_offset(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        show_cursor: bool,
+        offset_from_bottom: usize,
+    ) {
+        if self
+            .with_client_viewport(offset_from_bottom, area.height, |core, row_skip| {
+                Self::render_locked(core, frame, area, show_cursor, row_skip);
+            })
+            .is_none()
+        {
+            self.render(frame, area, show_cursor);
+        }
+    }
+
+    fn with_client_viewport<R>(
+        &self,
+        offset_from_bottom: usize,
+        visible_rows: u16,
+        operation: impl FnOnce(&mut GhosttyPaneCore, u16) -> R,
+    ) -> Option<R> {
+        let mut core = self.core.lock().ok()?;
+        let projection =
+            ClientViewportProjection::new(&core.terminal, offset_from_bottom, visible_rows)?;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_ghostty_scroll_offset(&mut core, projection.engine_offset, |core| {
+                operation(core, projection.row_skip)
+            })
+        }));
+        // Resume only after releasing the lock. A caught projection panic must not
+        // poison the one working terminal's parser/render mutex.
+        drop(core);
+        match result {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    fn render_locked(
+        core: &mut GhosttyPaneCore,
+        frame: &mut Frame,
+        area: Rect,
+        show_cursor: bool,
+        row_skip: u16,
+    ) {
         if core
             .terminal
             .mode_get(crate::ghostty::MODE_SYNCHRONIZED_OUTPUT)
@@ -2454,6 +2617,11 @@ impl GhosttyPaneTerminal {
                 Ok(rows) => rows,
                 Err(_) => return,
             };
+            for _ in 0..row_skip {
+                if !rows.next() {
+                    return;
+                }
+            }
             let mut grapheme_bytes = Vec::new();
             let mut symbol_scratch = String::new();
             let mut y = 0u16;
@@ -2510,15 +2678,17 @@ impl GhosttyPaneTerminal {
             }
         }
 
-        ghostty_clear_render_dirty(render_state, area.height);
+        ghostty_clear_render_dirty(render_state, area.height.saturating_add(row_skip));
 
         let current_cursor = cursor_state_from_render_state(render_state, decscusr_tracker);
         if show_cursor {
             if let Some(cursor) =
-                effective_cursor_state(&mut core, current_cursor).filter(|cursor| cursor.visible)
+                effective_cursor_state(core, current_cursor).filter(|cursor| cursor.visible)
             {
-                if cursor.x < area.width && cursor.y < area.height {
-                    frame.set_cursor_position((area.x + cursor.x, area.y + cursor.y));
+                if let Some(y) = cursor.y.checked_sub(row_skip) {
+                    if cursor.x < area.width && y < area.height {
+                        frame.set_cursor_position((area.x + cursor.x, area.y + y));
+                    }
                 }
             }
         }
@@ -2834,6 +3004,14 @@ fn ghostty_visible_hyperlinks(
     core: &mut GhosttyPaneCore,
     area: Rect,
 ) -> Result<VisibleHyperlinks, crate::ghostty::Error> {
+    ghostty_visible_hyperlinks_from_row(core, area, 0)
+}
+
+fn ghostty_visible_hyperlinks_from_row(
+    core: &mut GhosttyPaneCore,
+    area: Rect,
+    row_skip: u16,
+) -> Result<VisibleHyperlinks, crate::ghostty::Error> {
     let GhosttyPaneCore {
         terminal,
         render_state,
@@ -2843,6 +3021,11 @@ fn ghostty_visible_hyperlinks(
     let mut row_iterator = crate::ghostty::RowIterator::new()?;
     let mut row_cells = crate::ghostty::RowCells::new()?;
     let mut rows = render_state.populate_row_iterator(&mut row_iterator)?;
+    for _ in 0..row_skip {
+        if !rows.next() {
+            return Ok(Vec::new());
+        }
+    }
     let mut links = Vec::new();
     let mut y = 0u16;
     while y < area.height && rows.next() {
@@ -2850,7 +3033,9 @@ fn ghostty_visible_hyperlinks(
         let mut x = 0u16;
         while x < area.width && cells.next() {
             if cells.has_hyperlink()? {
-                if let Some(uri) = terminal.viewport_hyperlink_uri(x, y.into())? {
+                if let Some(uri) =
+                    terminal.viewport_hyperlink_uri(x, u32::from(y) + u32::from(row_skip))?
+                {
                     links.push(((area.x + x, area.y + y), ghostty_cell_symbol(&cells)?, uri));
                 }
             }
@@ -3123,6 +3308,59 @@ fn ghostty_recent_read_range(
         .unwrap_or_else(|| total_rows.saturating_sub(1));
     let start = end.saturating_add(1).saturating_sub(lines);
     Ok(Some((start, end, cols)))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ClientViewportProjection {
+    engine_offset: usize,
+    row_skip: u16,
+}
+
+impl ClientViewportProjection {
+    fn new(
+        terminal: &crate::ghostty::Terminal,
+        offset_from_bottom: usize,
+        visible_rows: u16,
+    ) -> Option<Self> {
+        let scrollbar = terminal.scrollbar().ok()?;
+        let source_rows = scrollbar.len;
+        if source_rows == 0 {
+            return None;
+        }
+        let client_rows = usize::from(visible_rows).clamp(1, source_rows);
+        let client_max = scrollbar.total.saturating_sub(client_rows);
+        let requested_offset = offset_from_bottom.min(client_max);
+        let engine_max = scrollbar.total.saturating_sub(source_rows);
+        let engine_offset = requested_offset.min(engine_max);
+        // Ghostty exposes a window of source_rows. The shorter client reads a
+        // suffix of that window; near the oldest history row the suffix moves
+        // upward until row_skip reaches zero.
+        let row_skip = source_rows
+            .saturating_sub(client_rows)
+            .saturating_sub(requested_offset - engine_offset);
+        Some(Self {
+            engine_offset,
+            row_skip: u16::try_from(row_skip).ok()?,
+        })
+    }
+}
+
+fn with_ghostty_scroll_offset<R>(
+    core: &mut GhosttyPaneCore,
+    offset_from_bottom: usize,
+    operation: impl FnOnce(&mut GhosttyPaneCore) -> R,
+) -> Option<R> {
+    let scrollbar = core.terminal.scrollbar().ok()?;
+    let previous = scrollbar
+        .total
+        .saturating_sub(scrollbar.offset.saturating_add(scrollbar.len));
+    ghostty_set_scroll_offset_from_bottom(&mut core.terminal, offset_from_bottom);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(core)));
+    ghostty_set_scroll_offset_from_bottom(&mut core.terminal, previous);
+    match result {
+        Ok(value) => Some(value),
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
 fn ghostty_set_scroll_offset_from_bottom(
@@ -5905,6 +6143,89 @@ mod tests {
         }
 
         assert!(pane.visible_text().contains("000000"));
+    }
+
+    #[test]
+    fn client_view_render_uses_requested_scroll_without_changing_shared_viewport() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(80, 3, 100).unwrap();
+        write_numbered_lines(&mut terminal, 12);
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        let metrics = pane.scroll_metrics().expect("initial scroll metrics");
+        assert_eq!(metrics.offset_from_bottom, 0);
+        assert!(metrics.max_offset_from_bottom >= 8);
+
+        let render = |offset| {
+            let backend = ratatui::backend::TestBackend::new(80, 3);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| {
+                    pane.render_at_scroll_offset(frame, Rect::new(0, 0, 80, 3), false, offset)
+                })
+                .unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+
+        let live = render(0);
+        let history = render(metrics.max_offset_from_bottom);
+        assert!(live.contains("000011"), "live view: {live:?}");
+        assert!(history.contains("000000"), "history view: {history:?}");
+        assert_eq!(
+            pane.scroll_metrics()
+                .expect("restored shared viewport")
+                .offset_from_bottom,
+            0,
+            "rendering a client-local view must restore the one shared engine viewport"
+        );
+    }
+
+    #[test]
+    fn client_view_restores_shared_viewport_when_projection_panics() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(80, 3, 100).unwrap();
+        write_numbered_lines(&mut terminal, 12);
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pane.with_client_viewport(4, 3, |_, _| panic!("projection failure"));
+        }));
+        assert!(result.is_err());
+        assert!(
+            pane.core.lock().is_ok(),
+            "projection panic must not poison parser lock"
+        );
+        assert_eq!(pane.scroll_metrics().unwrap().offset_from_bottom, 0);
+    }
+
+    #[test]
+    fn shorter_client_projection_reaches_both_live_tail_and_oldest_row() {
+        let mut terminal = crate::ghostty::Terminal::new(80, 35, 100).unwrap();
+        for n in 0..90 {
+            terminal.write(format!("line {n:03}\r\n").as_bytes());
+        }
+        let scrollbar = terminal.scrollbar().unwrap();
+        let engine_max = scrollbar.total - scrollbar.len;
+        let client_max = scrollbar.total - 24;
+        let live = ClientViewportProjection::new(&terminal, 0, 24).unwrap();
+        assert_eq!(live.engine_offset, 0);
+        assert_eq!(live.row_skip, 11);
+        let oldest = ClientViewportProjection::new(&terminal, client_max, 24).unwrap();
+        assert_eq!(oldest.engine_offset, engine_max);
+        assert_eq!(oldest.row_skip, 0);
+        let near_oldest = ClientViewportProjection::new(&terminal, client_max - 5, 24).unwrap();
+        assert_eq!(near_oldest.engine_offset, engine_max);
+        assert_eq!(near_oldest.row_skip, 5);
+
+        let (tx, _rx) = mpsc::channel(4);
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        let full_cursor = pane.cursor_state_at_scroll_offset(0, 35).unwrap();
+        let short_cursor = pane.cursor_state_at_scroll_offset(0, 24).unwrap();
+        assert_eq!(short_cursor.y, full_cursor.y - 11);
     }
 
     #[test]

@@ -156,7 +156,7 @@ impl PtyIoActorHandle {
         if self.failure.reason().is_some() || !user_writes.accepting {
             return Err(mpsc::error::TrySendError::Closed(bytes));
         }
-        if bytes.len() > 1024 * 1024 {
+        if bytes.len() > budget::MAX_USER_WRITE_BYTES {
             return Err(mpsc::error::TrySendError::Full(bytes));
         }
         let Some(permit) = self.input_budget.acquire(bytes.len()) else {
@@ -1231,6 +1231,30 @@ mod tests {
         initially_quiesced: bool,
     ) -> (PtyIoActorHandle, UnixStream, std_mpsc::Receiver<Bytes>) {
         actor_with_socket_pair_and_poll_observer(initially_quiesced, None)
+    }
+
+    #[test]
+    fn m5_unix_pty_accepts_full_decoded_paste_plus_markers() {
+        let (handle, mut peer, _read_rx) = actor_with_socket_pair(false);
+        peer.set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("bounded PTY read timeout");
+        let max = budget::MAX_USER_WRITE_BYTES;
+        assert_eq!(
+            max,
+            crate::protocol::MAX_INPUT_PAYLOAD + budget::PASTE_MARKER_BYTES
+        );
+        handle
+            .try_write_user_input(Bytes::from(vec![b'x'; max]))
+            .expect("full admitted bracketed paste fits actor budget");
+        let mut received = vec![0; max];
+        peer.read_exact(&mut received)
+            .expect("actor forwards all admitted PTY bytes");
+        assert!(received.iter().all(|byte| *byte == b'x'));
+        assert!(matches!(
+            handle.try_write_user_input(Bytes::from(vec![b'x'; max + 1])),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+        handle.shutdown();
     }
 
     fn actor_with_socket_pair_and_poll_observer(

@@ -2486,31 +2486,73 @@ impl HeadlessServer {
                     }
                     return runtime.scroll_metrics() != scroll_before;
                 }
-                let interaction = client_pane_input_has_interaction(&events);
                 if let Some(client) = self.clients.get_mut(&client_id) {
                     client
                         .track_shell_input(ClientShellInputTarget::Pane(pane_id.clone()), &events);
                 }
-                let foreground_changed =
-                    interaction && self.promote_client_to_foreground(client_id);
-                let geometry_changed =
-                    interaction && self.claim_shell_tab_geometry(client_id, false);
                 let Some(runtime) = self.app.state.runtime_for_pane_in_workspace(
                     &self.app.terminal_runtimes,
                     workspace_index,
                     runtime_pane_id,
                 ) else {
-                    return foreground_changed | geometry_changed;
+                    return false;
                 };
-                let scroll_before = runtime.scroll_metrics();
+                let scroll_context =
+                    super::pane_input::ClientLocalScrollContext::from_runtime(runtime);
+                let interaction = events.iter().any(|event| {
+                    super::pane_input::client_local_scroll_delta(scroll_context, event, true)
+                        .is_none()
+                        && !client_pane_input_releases_press(event)
+                });
+                let foreground_changed =
+                    interaction && self.promote_client_to_foreground(client_id);
+                let geometry_changed =
+                    interaction && self.claim_shell_tab_geometry(client_id, false);
+                let client_viewport_rows =
+                    self.shell_client_pane_viewport_rows(client_id, runtime_pane_id);
+                let Some(runtime) = self.app.state.runtime_for_pane_in_workspace(
+                    &self.app.terminal_runtimes,
+                    workspace_index,
+                    runtime_pane_id,
+                ) else {
+                    return false;
+                };
+                let mut scroll_changed = false;
                 let mut keyboard_forwarded = false;
-                let input_result = apply_client_terminal_input_events(
-                    runtime,
-                    &events,
-                    true,
-                    &mut keyboard_forwarded,
-                );
-                let scroll_changed = runtime.scroll_metrics() != scroll_before;
+                let mut input_result = Ok(());
+                for event in &events {
+                    if let Some(delta) =
+                        super::pane_input::client_local_scroll_delta(scroll_context, event, true)
+                    {
+                        if let (Some(metrics), Some(client)) =
+                            (runtime.scroll_metrics(), self.clients.get_mut(&client_id))
+                        {
+                            let metrics = metrics.for_client_rows(
+                                client_viewport_rows.unwrap_or(metrics.viewport_rows),
+                            );
+                            let before = client
+                                .reconcile_pane_scroll_view(runtime_pane_id, metrics)
+                                .offset_from_bottom;
+                            let after = client
+                                .scroll_pane_view_by(runtime_pane_id, delta, metrics)
+                                .offset_from_bottom;
+                            scroll_changed |= before != after;
+                        }
+                        continue;
+                    }
+                    if let Some(client) = self.clients.get_mut(&client_id) {
+                        client.clear_pane_scroll_view(runtime_pane_id);
+                    }
+                    if let Err(err) = apply_client_terminal_input_events(
+                        runtime,
+                        std::slice::from_ref(event),
+                        true,
+                        &mut keyboard_forwarded,
+                    ) {
+                        input_result = Err(err);
+                        break;
+                    }
+                }
                 if keyboard_forwarded {
                     self.note_interactive_input(runtime_pane_id, Instant::now());
                 }

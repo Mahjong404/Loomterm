@@ -28,7 +28,7 @@ use crate::protocol::endpoint::{
 use crate::protocol::{
     self, AttachScrollDirection, AttachScrollSource, ClientMessage, ClientPaneInputEvent,
     RenderEncoding, ServerMessage, MAX_CLIPBOARD_IMAGE_PAYLOAD, MAX_FRAME_SIZE,
-    MAX_GRAPHICS_FRAME_SIZE, PROTOCOL_VERSION,
+    MAX_GRAPHICS_FRAME_SIZE, MAX_INPUT_PAYLOAD, PROTOCOL_VERSION,
 };
 
 // A disconnected Windows peer must not retain handles in interprocess's flush-limbo pool.
@@ -110,8 +110,6 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(4);
 #[cfg(unix)]
 const OBSERVER_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Maximum input payload size (bytes) for a single `ClientMessage::Input`.
-const MAX_INPUT_PAYLOAD: usize = 1024 * 1024; // 1 MB
 const MAX_CLIENT_CELL_SIZE_PX: u32 = 4096;
 
 fn client_shell_geometry_error(
@@ -2221,6 +2219,9 @@ mod tests {
             "writer exited while cloned handles were still alive"
         );
 
+        // Windows lingers after a successful pipe write until the peer closes.
+        // End the already-read client before checking prompt writer teardown.
+        drop(client_stream);
         drop(cloned_writer);
         done_rx
             .recv_timeout(Duration::from_millis(100))

@@ -80,6 +80,9 @@ use terminal_setup::{
     setup_direct_attach_terminal, setup_terminal, should_draw_host_cursor, TerminalGuard,
 };
 
+#[cfg(windows)]
+const WINDOWS_STDIN_CHANNEL_CAPACITY: usize = 16;
+
 fn refresh_host_mouse_capture(enabled: bool, sgr_pixels: bool) {
     if let Err(err) = set_mouse_capture(enabled, sgr_pixels) {
         warn!(err = %err, "failed to re-assert host mouse capture");
@@ -536,9 +539,11 @@ async fn run_client_loop(
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ClientLoopEvent>(256);
     let (supervisor_tx, mut supervisor_rx) =
         tokio::sync::mpsc::channel::<endpoint::EndpointSupervisorEvent>(64);
-    // Keep Windows console draining independent of server-frame backpressure.
+    // Keep Windows console draining independent of server-frame backpressure,
+    // but do not retain 256 admitted 1 MiB pastes while the UI is stalled.
     #[cfg(windows)]
-    let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<ClientLoopEvent>(256);
+    let (stdin_tx, mut stdin_rx) =
+        tokio::sync::mpsc::channel::<ClientLoopEvent>(WINDOWS_STDIN_CHANNEL_CAPACITY);
     #[cfg(unix)]
     let stdin_tx = event_tx.clone();
 
@@ -1287,6 +1292,44 @@ async fn run_client_loop(
                     return Err(ClientError::ConnectionLost(err));
                 }
                 return Ok(());
+            }
+            #[cfg(windows)]
+            ClientLoopEvent::PasteRejected { size, max } => {
+                let message = format!(
+                    "Paste rejected: input is {size} bytes; Loomterm's limit is {max} bytes"
+                );
+                if let Some(shell) = state.shell.as_mut() {
+                    if shell.receive_endpoint_error(message) {
+                        let frame = shell.compose(state.reported_size.0, state.reported_size.1);
+                        if let Some(frame) = frame {
+                            state.present_frame(frame);
+                        }
+                    }
+                } else {
+                    warn!(
+                        size,
+                        max, "paste rejected before client shell became available"
+                    );
+                }
+            }
+            ClientLoopEvent::PasteOverflow { max } => {
+                let message = format!(
+                    "Paste rejected: incomplete input exceeded the framing budget; the payload limit is {max} bytes; waiting for its closing marker"
+                );
+                if let Some(shell) = state.shell.as_mut() {
+                    if shell.receive_endpoint_error(message) {
+                        if let Some(frame) =
+                            shell.compose(state.reported_size.0, state.reported_size.1)
+                        {
+                            state.present_frame(frame);
+                        }
+                    }
+                } else {
+                    warn!(
+                        max,
+                        "oversized incomplete paste before client shell became available"
+                    );
+                }
             }
             ClientLoopEvent::Resize(
                 new_cols,

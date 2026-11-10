@@ -355,14 +355,112 @@ pub(super) fn apply_client_terminal_input_events(
             | crate::raw_input::RawInputEvent::Unsupported => {
                 return Err("non-pane input reached targeted pane input".to_owned());
             }
+            #[cfg(any(windows, test))]
+            crate::raw_input::RawInputEvent::PasteOverflow => {
+                return Err("non-pane input reached targeted pane input".to_owned());
+            }
         }
     }
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct ClientLocalScrollContext {
+    wheel_routing: Option<crate::pane::WheelRouting>,
+    plain_page_keys: Option<bool>,
+    page_rows: u16,
+}
+
+impl ClientLocalScrollContext {
+    pub(super) fn from_runtime(runtime: &crate::terminal::TerminalRuntime) -> Self {
+        Self {
+            wheel_routing: runtime.wheel_routing(),
+            plain_page_keys: runtime.plain_page_keys_use_host_scrollback(),
+            page_rows: runtime.current_size().0.max(1),
+        }
+    }
+}
+
+pub(super) fn client_local_scroll_delta(
+    context: ClientLocalScrollContext,
+    event: &ClientPaneInputEvent,
+    host_page_keys: bool,
+) -> Option<isize> {
+    match event {
+        ClientPaneInputEvent::Mouse {
+            kind: crate::protocol::ClientMouseKind::ScrollUp,
+            lines,
+            ..
+        } if matches!(
+            context.wheel_routing,
+            None | Some(crate::pane::WheelRouting::HostScroll)
+        ) =>
+        {
+            Some(isize::try_from((*lines).max(1)).unwrap_or(isize::MAX))
+        }
+        ClientPaneInputEvent::Mouse {
+            kind: crate::protocol::ClientMouseKind::ScrollDown,
+            lines,
+            ..
+        } if matches!(
+            context.wheel_routing,
+            None | Some(crate::pane::WheelRouting::HostScroll)
+        ) =>
+        {
+            Some(-isize::try_from((*lines).max(1)).unwrap_or(isize::MAX))
+        }
+        ClientPaneInputEvent::Key {
+            code,
+            modifiers,
+            kind,
+            ..
+        } if host_page_keys
+            && *modifiers == 0
+            && *kind != crate::protocol::ClientKeyKind::Release
+            && context.plain_page_keys == Some(true) =>
+        {
+            let lines = isize::try_from(context.page_rows).unwrap_or(isize::MAX);
+            match code {
+                crate::protocol::ClientKeyCode::PageUp => Some(lines),
+                crate::protocol::ClientKeyCode::PageDown => Some(-lines),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn long_shell_paste_is_one_ordered_bracketed_pty_input_message() {
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80,
+                24,
+                0,
+                b"\x1b[?2004h",
+                4,
+            );
+        let text = "界😀\x01\x1b[31m".to_owned() + &"x".repeat(16 * 1024);
+        assert!(runtime.bracketed_paste_enabled());
+
+        assert!(test_apply_client_pane_input_events(
+            &runtime,
+            &[ClientPaneInputEvent::Paste(text.clone())],
+        )
+        .is_ok());
+
+        let actual = input_rx
+            .recv()
+            .await
+            .expect("paste reaches PTY input queue");
+        let expected = format!("\x1b[200~{text}\x1b[201~");
+        assert_eq!(actual.as_ref(), expected.as_bytes());
+        assert!(input_rx.try_recv().is_err(), "paste remains one queue item");
+    }
 
     #[tokio::test]
     async fn terminal_attach_stale_geometry_falls_back_to_the_canonical_cell() {

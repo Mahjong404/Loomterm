@@ -57,8 +57,18 @@ impl Drop for Permit {
 }
 
 pub(crate) fn input_budget() -> Arc<Budget> {
-    Budget::new(128, 2 * 1024 * 1024)
+    Budget::new(128, INPUT_BUDGET_BYTES)
 }
+// Paste admission is for decoded text. Windows expands each LF to CRLF and
+// both platforms add bracketed-paste markers before the PTY write.
+pub(crate) const PASTE_MARKER_BYTES: usize = b"\x1b[200~".len() + b"\x1b[201~".len();
+pub(crate) const INPUT_BUDGET_BYTES: usize =
+    2 * crate::protocol::MAX_INPUT_PAYLOAD + PASTE_MARKER_BYTES;
+#[cfg(windows)]
+pub(crate) const MAX_USER_WRITE_BYTES: usize = INPUT_BUDGET_BYTES;
+#[cfg(unix)]
+pub(crate) const MAX_USER_WRITE_BYTES: usize =
+    crate::protocol::MAX_INPUT_PAYLOAD + PASTE_MARKER_BYTES;
 pub(crate) fn reply_budget() -> Arc<Budget> {
     Budget::new(64, 256 * 1024)
 }
@@ -99,7 +109,7 @@ mod tests {
     #[test]
     fn input_pressure_cannot_consume_reply_reserve() {
         let input = input_budget();
-        let _input = input.acquire(2 * 1024 * 1024).unwrap();
+        let _input = input.acquire(INPUT_BUDGET_BYTES).unwrap();
         assert!(input.acquire(1).is_none());
         assert!(reply_budget().acquire(64 * 1024).is_some());
         let failure = IoFailure::default();

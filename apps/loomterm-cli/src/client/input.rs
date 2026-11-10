@@ -120,7 +120,8 @@ fn unix_stdin_reader_loop(
             &mut pending_palette,
             sgr_pixels,
             last_geometry,
-        ) {
+        ) || !send_unix_paste_overflow_if_any(&mut framer, &event_tx)
+        {
             return;
         }
         if (framer.has_pending_input() || !pending_palette.is_empty())
@@ -199,7 +200,7 @@ fn unix_stdin_reader_loop(
                     &direct_response,
                     &direct_response_active,
                 );
-                let chunks = if let Some((raw_chunks, responses)) = filtered {
+                let raw_chunks = if let Some((raw_chunks, responses)) = filtered {
                     for response in responses {
                         if event_tx
                             .blocking_send(ClientLoopEvent::DirectGraphicsResponse(response))
@@ -209,23 +210,24 @@ fn unix_stdin_reader_loop(
                         }
                     }
                     raw_chunks
-                        .into_iter()
-                        .flat_map(|chunk| framer.push(&chunk))
-                        .collect()
                 } else {
-                    framer.push(&scratch[..n])
+                    vec![scratch[..n].to_vec()]
                 };
+                for raw_chunk in raw_chunks {
+                    let chunks = framer.push(&raw_chunk);
+                    if !send_unix_input_chunks(
+                        chunks,
+                        &event_tx,
+                        &mut pending_palette,
+                        sgr_pixels,
+                        last_geometry,
+                    ) || !send_unix_paste_overflow_if_any(&mut framer, &event_tx)
+                    {
+                        return;
+                    }
+                }
                 if !framer.has_pending_input() {
                     pending_mode = None;
-                }
-                if !send_unix_input_chunks(
-                    chunks,
-                    &event_tx,
-                    &mut pending_palette,
-                    sgr_pixels,
-                    last_geometry,
-                ) {
-                    return;
                 }
 
                 let timeout_ms =
@@ -336,6 +338,19 @@ fn send_unix_input_chunks(
 }
 
 #[cfg(unix)]
+fn send_unix_paste_overflow_if_any(
+    framer: &mut crate::raw_input::RawInputByteFramer,
+    event_tx: &mpsc::Sender<ClientLoopEvent>,
+) -> bool {
+    !framer.take_paste_overflow()
+        || event_tx
+            .blocking_send(ClientLoopEvent::PasteOverflow {
+                max: crate::protocol::MAX_INPUT_PAYLOAD,
+            })
+            .is_ok()
+}
+
+#[cfg(unix)]
 fn retain_geometry(
     last: Option<crate::input::mouse::HostGeometry>,
     observed: Option<crate::input::mouse::HostGeometry>,
@@ -432,6 +447,7 @@ fn windows_client_input_event_from_raw(
         crate::raw_input::RawInputEvent::Paste(text) => {
             Some(crate::protocol::ClientInputEvent::Paste { text })
         }
+        crate::raw_input::RawInputEvent::PasteOverflow => None,
         crate::raw_input::RawInputEvent::OuterFocusGained => {
             Some(crate::protocol::ClientInputEvent::FocusGained)
         }
@@ -568,6 +584,47 @@ mod tests {
             2
         );
         assert!(pending.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn m5_unix_unfinished_paste_overflow_notifies_before_recovery_input() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut framer = crate::raw_input::RawInputByteFramer::default();
+        let mut palette = Vec::new();
+        assert!(framer.push(b"\x1b[200~").is_empty());
+        for _ in 0..(3 * 1024 * 1024 / 4096) {
+            assert!(send_unix_input_chunks(
+                framer.push(&[b'x'; 4096]),
+                &tx,
+                &mut palette,
+                false,
+                None,
+            ));
+            assert!(send_unix_paste_overflow_if_any(&mut framer, &tx));
+        }
+        assert!(
+            matches!(rx.try_recv().unwrap(), ClientLoopEvent::PasteOverflow { max }
+            if max == crate::protocol::MAX_INPUT_PAYLOAD)
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(framer.push(b"\x1b[201~").is_empty());
+        let chunks = framer.push(b"after");
+        assert!(send_unix_input_chunks(
+            chunks,
+            &tx,
+            &mut palette,
+            false,
+            None
+        ));
+        let mut recovered = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            let ClientLoopEvent::StdinInput(bytes) = event else {
+                panic!("unexpected event after rejected paste");
+            };
+            recovered.extend(bytes);
+        }
+        assert_eq!(recovered, b"after");
     }
 
     #[test]

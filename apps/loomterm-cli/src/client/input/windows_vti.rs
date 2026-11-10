@@ -97,6 +97,9 @@ fn process_platform_input_items(
 ) {
     for item in items {
         push_platform_input_events(pump.process(item), handoff, trace.as_deref_mut());
+        if std::mem::take(&mut pump.paste_overflow_pending) {
+            handoff.push_paste_overflow();
+        }
         if handoff.failed {
             break;
         }
@@ -180,16 +183,25 @@ struct WindowsInputTraceBatch {
 #[cfg(windows)]
 #[derive(Default)]
 struct WindowsInputHandoff {
-    pending: VecDeque<Vec<crate::protocol::ClientInputEvent>>,
+    pending: VecDeque<WindowsInputBatch>,
     backpressured: bool,
     queued_bytes: usize,
     failed: bool,
 }
 
 #[cfg(windows)]
+#[derive(Debug, PartialEq)]
+enum WindowsInputBatch {
+    Events(Vec<crate::protocol::ClientInputEvent>),
+    PasteRejected { size: usize, max: usize },
+    PasteOverflow { max: usize },
+}
+
+#[cfg(windows)]
 impl WindowsInputHandoff {
     const MAX_BATCHES: usize = 256;
-    const MAX_BYTES: usize = 1024 * 1024;
+    const MAX_BYTES: usize = crate::protocol::MAX_INPUT_PAYLOAD
+        + Self::MAX_BATCHES * std::mem::size_of::<crate::protocol::ClientInputEvent>();
 
     fn batch_bytes(events: &Vec<crate::protocol::ClientInputEvent>) -> usize {
         use crate::protocol::ClientInputEvent;
@@ -226,20 +238,69 @@ impl WindowsInputHandoff {
         if events.is_empty() || self.failed {
             return;
         }
+        let mut accepted = Vec::new();
+        for event in events {
+            if let crate::protocol::ClientInputEvent::Paste { text } = &event {
+                if text.len() > crate::protocol::MAX_INPUT_PAYLOAD {
+                    self.push_admitted(std::mem::take(&mut accepted));
+                    self.push_paste_rejected(text.len());
+                    if self.failed {
+                        return;
+                    }
+                    continue;
+                }
+            }
+            accepted.push(event);
+        }
+        self.push_admitted(accepted);
+    }
+
+    fn push_paste_rejected(&mut self, size: usize) {
+        if self.failed {
+            return;
+        }
+        if self.pending.len() >= Self::MAX_BATCHES {
+            self.failed = true;
+            tracing::error!("Windows input backlog exhausted while reporting rejected paste; detaching client after admitted input drains; work remains running");
+            return;
+        }
+        self.pending.push_back(WindowsInputBatch::PasteRejected {
+            size,
+            max: crate::protocol::MAX_INPUT_PAYLOAD,
+        });
+    }
+
+    fn push_admitted(&mut self, events: Vec<crate::protocol::ClientInputEvent>) {
+        if events.is_empty() || self.failed {
+            return;
+        }
         let cost = Self::batch_bytes(&events);
         if self.pending.len() >= Self::MAX_BATCHES
             || cost > Self::MAX_BYTES.saturating_sub(self.queued_bytes)
         {
             self.failed = true;
-            tracing::error!("Windows input backlog exhausted; current batch rejected; detaching client after admitted input drains; work remains running");
+            tracing::error!(cost, queued_bytes = self.queued_bytes, limit = Self::MAX_BYTES, "Windows input backlog exhausted; current batch rejected; detaching client after admitted input drains; work remains running");
             return;
         }
         if self.backpressured {
             self.push_backpressured(events);
         } else {
             self.queued_bytes += cost;
-            self.pending.push_back(events);
+            self.pending.push_back(WindowsInputBatch::Events(events));
         }
+    }
+
+    fn push_paste_overflow(&mut self) {
+        if self.failed {
+            return;
+        }
+        if self.pending.len() >= Self::MAX_BATCHES {
+            self.failed = true;
+            return;
+        }
+        self.pending.push_back(WindowsInputBatch::PasteOverflow {
+            max: crate::protocol::MAX_INPUT_PAYLOAD,
+        });
     }
 
     fn try_flush(&mut self, event_tx: &mpsc::Sender<ClientLoopEvent>) -> bool {
@@ -265,19 +326,37 @@ impl WindowsInputHandoff {
             }
             match event_tx.try_reserve() {
                 Ok(permit) => {
-                    let Some(events) = self.pending.pop_front() else {
+                    let Some(batch) = self.pending.pop_front() else {
                         continue;
                     };
-                    self.queued_bytes -= Self::batch_bytes(&events);
-                    permit.send(ClientLoopEvent::StdinEvents(events));
+                    match batch {
+                        WindowsInputBatch::Events(events) => {
+                            self.queued_bytes -= Self::batch_bytes(&events);
+                            permit.send(ClientLoopEvent::StdinEvents(events));
+                        }
+                        WindowsInputBatch::PasteRejected { size, max } => {
+                            permit.send(ClientLoopEvent::PasteRejected { size, max });
+                        }
+                        WindowsInputBatch::PasteOverflow { max } => {
+                            permit.send(ClientLoopEvent::PasteOverflow { max });
+                        }
+                    }
                 }
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     if !self.backpressured {
                         self.backpressured = true;
                         let pending = std::mem::take(&mut self.pending);
                         self.queued_bytes = 0;
-                        for events in pending {
-                            self.push_backpressured(events);
+                        for batch in pending {
+                            match batch {
+                                WindowsInputBatch::Events(events) => {
+                                    self.push_backpressured(events);
+                                }
+                                rejection @ (WindowsInputBatch::PasteRejected { .. }
+                                | WindowsInputBatch::PasteOverflow { .. }) => {
+                                    self.pending.push_back(rejection);
+                                }
+                            }
                         }
                     }
                     return true;
@@ -288,7 +367,7 @@ impl WindowsInputHandoff {
     }
 
     fn push_backpressured(&mut self, events: Vec<crate::protocol::ClientInputEvent>) {
-        if let Some(previous) = self.pending.back_mut() {
+        if let Some(WindowsInputBatch::Events(previous)) = self.pending.back_mut() {
             if let ([previous_event], [next_event]) = (previous.as_slice(), events.as_slice()) {
                 if windows_mouse_motion_can_replace(previous_event, next_event) {
                     self.queued_bytes -= Self::batch_bytes(previous);
@@ -299,7 +378,7 @@ impl WindowsInputHandoff {
             }
         }
         self.queued_bytes += Self::batch_bytes(&events);
-        self.pending.push_back(events);
+        self.pending.push_back(WindowsInputBatch::Events(events));
     }
 }
 
@@ -341,7 +420,7 @@ fn windows_mouse_motion_can_replace(
 fn windows_console_input_items(
     handle: windows_sys::Win32::Foundation::HANDLE,
     mapper: &mut WindowsInputMapper,
-    mut trace: Option<&mut WindowsInputTraceBatch>,
+    trace: Option<&mut WindowsInputTraceBatch>,
 ) -> WindowsInputItems {
     const WAIT_OBJECT_0: u32 = 0;
     const WAIT_TIMEOUT: u32 = 258;
@@ -352,7 +431,7 @@ fn windows_console_input_items(
         _ => return WindowsInputItems::Closed,
     }
 
-    let mut records = [windows_sys::Win32::System::Console::INPUT_RECORD::default(); 64];
+    let mut records = [windows_sys::Win32::System::Console::INPUT_RECORD::default(); 4096];
     let mut read = 0;
     let ok = unsafe {
         windows_sys::Win32::System::Console::ReadConsoleInputW(
@@ -366,15 +445,19 @@ fn windows_console_input_items(
         return WindowsInputItems::Closed;
     }
 
-    let mut items = Vec::new();
-    for record in records.iter().take(read as usize) {
-        if let Some(record) = windows_console_input_record_from_os(*record) {
-            if let (Some(trace), WindowsInputRecord::Key(key)) = (trace.as_deref_mut(), record) {
+    if let Some(trace) = trace {
+        for raw in records.iter().take(read as usize) {
+            if let Some(WindowsInputRecord::Key(key)) = windows_console_input_record_from_os(*raw) {
                 trace.raw_keys.push(key);
             }
-            items.extend(mapper.translate(record));
         }
     }
+    let items = mapper.translate_batch(
+        records
+            .iter()
+            .take(read as usize)
+            .filter_map(|record| windows_console_input_record_from_os(*record)),
+    );
     WindowsInputItems::Items(items)
 }
 
@@ -445,6 +528,7 @@ struct WindowsInputMapper {
 
 struct WindowsInputPump {
     framer: crate::raw_input::RawInputFramer,
+    paste_overflow_pending: bool,
     pending_escape_origin: Option<EscapeOrigin>,
     paste_from_win32_key_records: bool,
     pending_physical_escape: Option<(crate::protocol::ClientInputEvent, bool)>,
@@ -463,6 +547,7 @@ impl Default for WindowsInputPump {
     fn default() -> Self {
         Self {
             framer: crate::raw_input::RawInputFramer::for_host_input(),
+            paste_overflow_pending: false,
             pending_escape_origin: None,
             paste_from_win32_key_records: false,
             pending_physical_escape: None,
@@ -500,6 +585,9 @@ enum EscapeOrigin {
 #[derive(Default)]
 struct WindowsWin32InputModeFramer {
     buffer: Vec<u8>,
+    scan_from: usize,
+    #[cfg(test)]
+    scan_steps: usize,
 }
 
 enum WindowsWin32InputModeItem {
@@ -582,6 +670,9 @@ impl WindowsInputPump {
                     Vec::new()
                 } else {
                     let pending_paste = self.framer.has_pending_bracketed_paste();
+                    if pending_paste {
+                        self.framer.allow_serialized_win32_paste();
+                    }
                     if !pending_paste && self.framer.has_pending_default_mouse_sequence() {
                         self.stage_default_mouse_record(nested_record, &raw_bytes);
                     }
@@ -617,6 +708,9 @@ impl WindowsInputPump {
                 if suppress_consumed_key {
                     Vec::new()
                 } else if self.framer.has_pending_bracketed_paste() {
+                    if nested_record.is_some() {
+                        self.framer.allow_serialized_win32_paste();
+                    }
                     let bytes = if self.paste_from_win32_key_records {
                         &win32_paste_bytes
                     } else {
@@ -669,6 +763,13 @@ impl WindowsInputPump {
         &mut self,
         mut events: Vec<crate::raw_input::RawInputEvent>,
     ) -> Vec<crate::protocol::ClientInputEvent> {
+        if events
+            .iter()
+            .any(|event| matches!(event, crate::raw_input::RawInputEvent::PasteOverflow))
+        {
+            self.paste_overflow_pending = true;
+            self.paste_from_win32_key_records = false;
+        }
         for event in &mut events {
             if let crate::raw_input::RawInputEvent::Paste(text) = event {
                 let decoded = if self.paste_from_win32_key_records {
@@ -827,7 +928,12 @@ fn decode_win32_paste_payload(text: &str) -> Option<String> {
     }
     // Decode locally so invalid or incomplete surrogates cannot leak into the
     // next paste, and reject rather than partially replacing malformed text.
-    String::from_utf16(&units).ok()
+    let mut decoded = String::from_utf16(&units).ok()?;
+    // UTF-16 units understate the UTF-8 byte count. A few non-ASCII units
+    // near the 1 MiB limit can double String capacity; the bounded handoff
+    // must charge the retained allocation, not reject an admissible payload.
+    decoded.shrink_to_fit();
+    Some(decoded)
 }
 
 fn parse_win32_paste_record(report: &str) -> Option<WindowsKeyRecord> {
@@ -925,6 +1031,45 @@ struct WindowsMouseButtons {
 }
 
 impl WindowsInputMapper {
+    fn translate_batch(
+        &mut self,
+        records: impl IntoIterator<Item = WindowsInputRecord>,
+    ) -> Vec<PlatformInputItem> {
+        let mut items = Vec::new();
+        let mut ascii = Vec::new();
+        for record in records {
+            let batchable = match record {
+                WindowsInputRecord::Key(key)
+                    if key.key_down
+                        && key.repeat_count == 1
+                        && key.virtual_key_code == 0
+                        && key.virtual_scan_code == 0
+                        && key.control_key_state == 0
+                        && (0x20..=0x7e).contains(&key.unicode)
+                        && self.pending_high_surrogate.is_none()
+                        && (self.win32_input.buffer.first() == Some(&0x1b)
+                            || !ascii.is_empty()) =>
+                {
+                    Some(key.unicode as u8)
+                }
+                _ => None,
+            };
+            if let Some(byte) = batchable {
+                ascii.push(byte);
+                continue;
+            }
+            if !ascii.is_empty() {
+                items.extend(self.translate_win32_input_mode_bytes(&ascii));
+                ascii.clear();
+            }
+            items.extend(self.translate(record));
+        }
+        if !ascii.is_empty() {
+            items.extend(self.translate_win32_input_mode_bytes(&ascii));
+        }
+        items
+    }
+
     fn idle(&mut self) -> Vec<PlatformInputItem> {
         self.win32_input
             .flush_timeout()
@@ -1502,22 +1647,29 @@ impl WindowsWin32InputModeFramer {
 
     fn next_item(&mut self) -> Option<WindowsWin32InputModeItem> {
         if self.buffer.is_empty() {
+            self.scan_from = 0;
             return None;
         }
 
         if self.buffer.as_slice() == b"\x1b" || self.buffer.as_slice() == b"\x1b[" {
+            self.scan_from = self.buffer.len();
             return None;
         }
 
         if self.buffer.starts_with(b"\x1b[") {
-            let mut cursor = 2;
+            let mut cursor = self.scan_from.max(2);
             while cursor < self.buffer.len()
                 && (self.buffer[cursor].is_ascii_digit() || self.buffer[cursor] == b';')
             {
+                #[cfg(test)]
+                {
+                    self.scan_steps += 1;
+                }
                 cursor += 1;
             }
 
             if cursor == self.buffer.len() {
+                self.scan_from = cursor;
                 return None;
             }
 
@@ -1531,16 +1683,19 @@ impl WindowsWin32InputModeFramer {
                     }
                 });
                 self.buffer.drain(..=cursor);
+                self.scan_from = 0;
                 return Some(item.unwrap_or(WindowsWin32InputModeItem::Bytes(bytes)));
             }
         }
 
+        self.scan_from = 0;
         Some(WindowsWin32InputModeItem::Bytes(vec![self
             .buffer
             .remove(0)]))
     }
 
     fn flush_timeout(&mut self) -> Vec<Vec<u8>> {
+        self.scan_from = 0;
         if self.buffer.is_empty() {
             Vec::new()
         } else {
@@ -2170,7 +2325,13 @@ mod tests {
         push_platform_input_events(Vec::new(), &mut handoff, Some(&mut trace));
 
         assert_eq!(trace.mapped_event_groups, groups);
-        assert_eq!(handoff.pending, VecDeque::from(groups));
+        assert_eq!(
+            handoff.pending,
+            groups
+                .into_iter()
+                .map(WindowsInputBatch::Events)
+                .collect::<VecDeque<_>>()
+        );
     }
 
     #[cfg(windows)]
@@ -2239,7 +2400,7 @@ mod tests {
             expected
                 .iter()
                 .cloned()
-                .map(|event| vec![event])
+                .map(|event| WindowsInputBatch::Events(vec![event]))
                 .collect::<VecDeque<_>>()
         );
         assert!(matches!(event_rx.try_recv(), Ok(ClientLoopEvent::Timer)));
@@ -2267,6 +2428,51 @@ mod tests {
         assert!(shortcut_preserved);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn m5_windows_stdin_channel_bounds_pastes_and_preserves_rejection_order() {
+        use crate::protocol::ClientInputEvent;
+
+        let (tx, mut rx) = mpsc::channel(crate::client::WINDOWS_STDIN_CHANNEL_CAPACITY);
+        let mut handoff = WindowsInputHandoff::default();
+        for index in 0..crate::client::WINDOWS_STDIN_CHANNEL_CAPACITY {
+            handoff.push(vec![ClientInputEvent::Paste {
+                text: ((b'A' + index as u8) as char)
+                    .to_string()
+                    .repeat(crate::protocol::MAX_INPUT_PAYLOAD),
+            }]);
+            assert!(handoff.try_flush(&tx));
+        }
+        handoff.push(vec![ClientInputEvent::Paste {
+            text: "x".repeat(crate::protocol::MAX_INPUT_PAYLOAD + 1),
+        }]);
+        handoff.push(vec![ClientInputEvent::TextCommit("after".into())]);
+        assert!(handoff.try_flush(&tx));
+        assert_eq!(handoff.pending.len(), 2);
+        assert!(!handoff.failed);
+
+        for index in 0..crate::client::WINDOWS_STDIN_CHANNEL_CAPACITY {
+            let ClientLoopEvent::StdinEvents(events) = rx.try_recv().unwrap() else {
+                panic!("expected admitted paste");
+            };
+            assert!(
+                matches!(events.as_slice(), [ClientInputEvent::Paste { text }]
+                if text.len() == crate::protocol::MAX_INPUT_PAYLOAD
+                    && text.as_bytes()[0] == b'A' + index as u8)
+            );
+            assert!(handoff.try_flush(&tx));
+        }
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            ClientLoopEvent::PasteRejected { .. }
+        ));
+        assert!(
+            matches!(rx.try_recv().unwrap(), ClientLoopEvent::StdinEvents(events)
+            if events == [ClientInputEvent::TextCommit("after".into())])
+        );
+        assert!(!handoff.failed);
+    }
+
     #[test]
     fn vti_bracketed_paste_records_emit_single_paste() {
         let records = "\x1b[200~alpha\rbravo\rcharlie\x1b[201~"
@@ -2279,6 +2485,58 @@ mod tests {
                 text: "alpha\rbravo\rcharlie".into(),
             }]
         );
+    }
+
+    #[test]
+    fn m5_win32_serialized_key_framer_scans_linearly() {
+        let wrapper = b"\x1b[0;0;120;1;0;1_";
+        let mut framer = WindowsWin32InputModeFramer::default();
+        let mut emitted = 0;
+        for byte in wrapper.repeat(4096) {
+            emitted += framer.push(std::slice::from_ref(&byte)).len();
+        }
+        assert_eq!(emitted, 4096);
+        assert!(
+            framer.scan_steps <= wrapper.len() * 4096,
+            "scanned {} positions for {} bytes",
+            framer.scan_steps,
+            wrapper.len() * 4096
+        );
+    }
+
+    #[test]
+    fn m5_batched_console_ascii_preserves_recordwise_input_items() {
+        let mut records: Vec<_> = "\x1b[0;0;120;1;0;1_\x1b[200~line\r\x1b[201~"
+            .chars()
+            .map(key_char)
+            .collect();
+        records.push(WindowsInputRecord::Focus(false));
+        records.extend("\x1b[0;0;121;1;0;1_".chars().map(key_char));
+        records.push(WindowsInputRecord::Key(WindowsKeyRecord {
+            key_down: true,
+            repeat_count: 1,
+            virtual_key_code: 0,
+            virtual_scan_code: 0,
+            unicode: 0xd83d,
+            control_key_state: 0,
+        }));
+        records.push(key_char('a'));
+        for width in [1, 7, 128] {
+            let mut expected = Vec::new();
+            let mut actual = Vec::new();
+            let mut recordwise = WindowsInputMapper::default();
+            let mut batched = WindowsInputMapper::default();
+            for chunk in records.chunks(width) {
+                expected.extend(
+                    chunk
+                        .iter()
+                        .copied()
+                        .flat_map(|record| recordwise.translate(record)),
+                );
+                actual.extend(batched.translate_batch(chunk.iter().copied()));
+            }
+            assert_eq!(actual, expected, "batch width {width}");
+        }
     }
 
     #[test]
@@ -2352,6 +2610,26 @@ mod tests {
         text.encode_utf16()
             .map(|unit| format!("\x1b[0;0;{unit};1;0;1_\x1b[0;0;{unit};0;0;1_"))
             .collect()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn m5_near_limit_unicode_paste_fits_bounded_handoff_after_decoding() {
+        let mut payload = "中文".to_owned();
+        payload.push_str(&"x".repeat(crate::protocol::MAX_INPUT_PAYLOAD - payload.len()));
+        let serialized = serialized_paste_text(&payload);
+        let decoded = decode_win32_paste_payload(&serialized).expect("complete key-record pairs");
+        assert_eq!(decoded, payload);
+        assert!(decoded.capacity() <= crate::protocol::MAX_INPUT_PAYLOAD);
+        let mut handoff = WindowsInputHandoff::default();
+        handoff.push(vec![crate::protocol::ClientInputEvent::Paste {
+            text: decoded,
+        }]);
+        assert!(
+            !handoff.failed,
+            "valid payload must not exhaust local memory admission"
+        );
+        assert_eq!(handoff.pending.len(), 1);
     }
 
     #[test]
@@ -2681,13 +2959,231 @@ mod tests {
         }
         assert_eq!(admitted, WindowsInputHandoff::MAX_BATCHES);
         assert_eq!(handoff.queued_bytes, 0);
+
+        let mut recovery = WindowsInputHandoff::default();
+        recovery.push(vec![ClientInputEvent::Paste {
+            text: "x".repeat(crate::protocol::MAX_INPUT_PAYLOAD + 1),
+        }]);
+        recovery.push(vec![ClientInputEvent::TextCommit("after paste".into())]);
+        assert!(!recovery.failed, "an oversized paste is recoverable");
+        assert_eq!(recovery.pending.len(), 2);
+        assert!(recovery.try_flush(&tx));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            ClientLoopEvent::PasteRejected {
+                size,
+                max,
+            } if size == crate::protocol::MAX_INPUT_PAYLOAD + 1
+                && max == crate::protocol::MAX_INPUT_PAYLOAD
+        ));
+        assert!(recovery.try_flush(&tx));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            ClientLoopEvent::StdinEvents(events)
+                if events == [ClientInputEvent::TextCommit("after paste".into())]
+        ));
+        assert_eq!(recovery.queued_bytes, 0);
+
+        let mut boundary = WindowsInputHandoff::default();
+        boundary.push(vec![ClientInputEvent::Paste {
+            text: "x".repeat(crate::protocol::MAX_INPUT_PAYLOAD),
+        }]);
+        assert!(
+            !boundary.failed,
+            "the protocol payload limit remains admissible"
+        );
+        assert_eq!(boundary.pending.len(), 1);
+        assert!(matches!(
+            boundary.pending.front(),
+            Some(WindowsInputBatch::Events(events))
+                if matches!(events.as_slice(), [ClientInputEvent::Paste { text }]
+                    if text.len() == crate::protocol::MAX_INPUT_PAYLOAD)
+        ));
+
         let mut large = WindowsInputHandoff::default();
         large.push(vec![ClientInputEvent::Paste {
-            text: "x".repeat(WindowsInputHandoff::MAX_BYTES + 1),
+            text: "x".repeat(crate::protocol::MAX_INPUT_PAYLOAD + 1),
         }]);
-        assert!(large.failed);
-        assert!(large.pending.is_empty());
+        assert!(!large.failed);
+        assert!(matches!(
+            large.pending.as_slices().0,
+            [WindowsInputBatch::PasteRejected {
+                size,
+                max,
+            }] if *size == crate::protocol::MAX_INPUT_PAYLOAD + 1
+                && *max == crate::protocol::MAX_INPUT_PAYLOAD
+        ));
         assert_eq!(large.queued_bytes, 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn vti_oversized_bracketed_paste_recovers_on_same_input_handoff() {
+        use crate::protocol::ClientInputEvent;
+
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut pump = WindowsInputPump::default();
+        let mut handoff = WindowsInputHandoff::default();
+        let large_text = "x".repeat(1_225_008);
+        let recovery_text = format!("界😀\n\r{}", "x".repeat(301 - "界😀\n\r".len()));
+        let mut wire = b"\x1b[200~".to_vec();
+        wire.extend_from_slice(large_text.as_bytes());
+        wire.extend_from_slice(b"\x1b[201~");
+        for chunk in wire.chunks(8_000) {
+            let events = pump.process(PlatformInputItem::Bytes(chunk.to_vec()));
+            handoff.push(events);
+            assert!(!handoff.failed);
+        }
+        assert_eq!(handoff.pending.len(), 1);
+        assert_eq!(handoff.queued_bytes, 0);
+        assert!(handoff.try_flush(&tx));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            ClientLoopEvent::PasteRejected { size, max }
+                if size == large_text.len() && max == crate::protocol::MAX_INPUT_PAYLOAD
+        ));
+
+        let mut recovery_wire = b"\x1b[200~".to_vec();
+        recovery_wire.extend_from_slice(recovery_text.as_bytes());
+        recovery_wire.extend_from_slice(b"\x1b[201~");
+        for chunk in recovery_wire.chunks(7) {
+            handoff.push(pump.process(PlatformInputItem::Bytes(chunk.to_vec())));
+            assert!(!handoff.failed);
+        }
+        assert!(handoff.try_flush(&tx));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            ClientLoopEvent::StdinEvents(events)
+                if matches!(events.as_slice(), [ClientInputEvent::Paste { text }]
+                    if text == &recovery_text)
+        ));
+        assert_eq!(handoff.queued_bytes, 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn vti_oversized_paste_in_mixed_batch_preserves_neighbors() {
+        use crate::protocol::ClientInputEvent;
+        let mut handoff = WindowsInputHandoff::default();
+        handoff.push(vec![
+            ClientInputEvent::TextCommit("before".into()),
+            ClientInputEvent::Paste {
+                text: "x".repeat(crate::protocol::MAX_INPUT_PAYLOAD + 1),
+            },
+            ClientInputEvent::TextCommit("after".into()),
+        ]);
+        assert!(!handoff.failed);
+        assert_eq!(handoff.pending.len(), 3);
+        assert!(
+            matches!(handoff.pending.front(), Some(WindowsInputBatch::Events(events))
+            if matches!(events.as_slice(), [ClientInputEvent::TextCommit(text)] if text == "before"))
+        );
+        assert!(
+            matches!(handoff.pending.get(1), Some(WindowsInputBatch::PasteRejected { size, .. })
+            if *size == crate::protocol::MAX_INPUT_PAYLOAD + 1)
+        );
+        assert!(
+            matches!(handoff.pending.get(2), Some(WindowsInputBatch::Events(events))
+            if matches!(events.as_slice(), [ClientInputEvent::TextCommit(text)] if text == "after"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn vti_unfinished_paste_overflow_is_ordered_and_recovers() {
+        use crate::protocol::ClientInputEvent;
+
+        let (tx, mut rx) = mpsc::channel(3);
+        let mut pump = WindowsInputPump::default();
+        let mut handoff = WindowsInputHandoff::default();
+        handoff.push(vec![ClientInputEvent::TextCommit("before".into())]);
+        process_platform_input_items(
+            vec![PlatformInputItem::Bytes(b"\x1b[200~".to_vec())],
+            &mut pump,
+            &mut handoff,
+            None,
+        );
+        for _ in 0..(3 * 1024 * 1024 / 4096) {
+            process_platform_input_items(
+                vec![PlatformInputItem::Bytes(vec![b'x'; 4096])],
+                &mut pump,
+                &mut handoff,
+                None,
+            );
+        }
+        assert!(pump.framer.has_pending_bracketed_paste());
+        assert!(!handoff.failed);
+        assert!(
+            matches!(handoff.pending.get(1), Some(WindowsInputBatch::PasteOverflow { max })
+            if *max == crate::protocol::MAX_INPUT_PAYLOAD)
+        );
+        assert_eq!(handoff.pending.len(), 2);
+
+        for bytes in [b"\x1b[2".as_slice(), b"01~".as_slice()] {
+            process_platform_input_items(
+                vec![PlatformInputItem::Bytes(bytes.to_vec())],
+                &mut pump,
+                &mut handoff,
+                None,
+            );
+        }
+        assert!(!pump.framer.has_pending_bracketed_paste());
+        let recovery = "界😀\n";
+        let mut wire = b"\x1b[200~".to_vec();
+        wire.extend_from_slice(recovery.as_bytes());
+        wire.extend_from_slice(b"\x1b[201~");
+        process_platform_input_items(
+            vec![PlatformInputItem::Bytes(wire)],
+            &mut pump,
+            &mut handoff,
+            None,
+        );
+        assert!(handoff.try_flush(&tx));
+        assert!(
+            matches!(rx.try_recv().unwrap(), ClientLoopEvent::StdinEvents(events)
+            if matches!(events.as_slice(), [ClientInputEvent::TextCommit(text)] if text == "before"))
+        );
+        assert!(
+            matches!(rx.try_recv().unwrap(), ClientLoopEvent::PasteOverflow { max }
+            if max == crate::protocol::MAX_INPUT_PAYLOAD)
+        );
+        assert!(
+            matches!(rx.try_recv().unwrap(), ClientLoopEvent::StdinEvents(events)
+            if matches!(events.as_slice(), [ClientInputEvent::Paste { text }] if text == recovery))
+        );
+        assert_eq!(handoff.queued_bytes, 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn vti_recognized_serialized_records_get_expanded_raw_budget() {
+        let mut pump = WindowsInputPump::default();
+        assert!(pump
+            .process(PlatformInputItem::Bytes(b"\x1b[200~".to_vec()))
+            .is_empty());
+        let nested_record = WindowsKeyRecord {
+            key_down: true,
+            repeat_count: 1,
+            virtual_key_code: 0,
+            virtual_scan_code: 0,
+            unicode: b'x'.into(),
+            control_key_state: 0,
+        };
+        for _ in 0..(3 * 1024 * 1024 / 4096) {
+            assert!(pump
+                .process(PlatformInputItem::PasteAwareBytes {
+                    paste_bytes: vec![b'x'; 4096],
+                    raw_bytes: b"x".to_vec(),
+                    win32_paste_bytes: b"x".to_vec(),
+                    nested_record,
+                })
+                .is_empty());
+        }
+        assert!(!pump.paste_overflow_pending);
+        assert!(
+            matches!(pump.process(PlatformInputItem::Bytes(b"\x1b[201~".to_vec())).as_slice(),
+            [crate::protocol::ClientInputEvent::Paste { text }] if text.len() == 3 * 1024 * 1024)
+        );
     }
 
     #[test]

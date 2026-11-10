@@ -187,9 +187,9 @@ pub(super) fn render_pane_scrollbar(
     app: &AppState,
     frame: &mut Frame,
     info: &PaneInfo,
-    rt: &crate::terminal::TerminalRuntime,
+    metrics: Option<crate::pane::ScrollMetrics>,
 ) {
-    let Some(metrics) = rt.scroll_metrics() else {
+    let Some(metrics) = metrics else {
         return;
     };
     let Some(track) = pane_scrollbar_rect(info) else {

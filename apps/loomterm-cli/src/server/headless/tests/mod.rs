@@ -3554,6 +3554,111 @@ async fn deferred_worktree_open_disconnect_keeps_other_clients_focus() {
 }
 
 #[tokio::test]
+async fn client_shell_scroll_and_return_to_tail_are_attachment_local() {
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("two readers");
+    let pane_id = workspace.tabs[0].root_pane;
+    let (runtime, mut input_rx) =
+        crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+            80,
+            5,
+            10_000,
+            b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix\r\nseven\r\neight\r\n",
+            4,
+        );
+    workspace.insert_test_runtime(pane_id, runtime);
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    let public_pane_id = server.app.public_pane_id(0, pane_id).unwrap();
+    for client_id in [11, 12] {
+        server.clients.insert(
+            client_id,
+            ClientConnection::new_with_mode(
+                ClientConnectionMode::ClientShell,
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                client_id,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+    }
+    let wheel = crate::protocol::ClientPaneInputEvent::Mouse {
+        kind: crate::protocol::ClientMouseKind::ScrollUp,
+        position: crate::protocol::ClientMousePosition::Cell { column: 2, row: 1 },
+        geometry: None,
+        modifiers: 0,
+        lines: 3,
+    };
+    for client_id in [11, 12] {
+        assert_eq!(
+            server.handle_server_event_with_render_impact(ServerEvent::ClientShellPaneInput {
+                client_id,
+                pane_id: public_pane_id.clone(),
+                events: vec![wheel.clone()],
+            }),
+            RenderImpact::Full
+        );
+        let metrics = server
+            .app
+            .state
+            .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+            .unwrap()
+            .scroll_metrics()
+            .unwrap();
+        assert_eq!(
+            server
+                .clients
+                .get_mut(&client_id)
+                .unwrap()
+                .reconcile_pane_scroll_view(pane_id, metrics)
+                .offset_from_bottom,
+            3
+        );
+        assert_eq!(
+            server
+                .app
+                .state
+                .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id,)
+                .unwrap()
+                .scroll_metrics()
+                .unwrap()
+                .offset_from_bottom,
+            0,
+            "neither client may scroll the shared engine viewport"
+        );
+    }
+
+    server.handle_server_event_with_render_impact(ServerEvent::ClientShellPaneInput {
+        client_id: 11,
+        pane_id: public_pane_id,
+        events: vec![crate::protocol::ClientPaneInputEvent::TextCommit(
+            "x".to_owned(),
+        )],
+    });
+    assert_eq!(input_rx.try_recv().unwrap(), Bytes::from_static(b"x"));
+    assert!(server.clients[&11].pane_scroll_views.is_empty());
+    let metrics = server
+        .app
+        .state
+        .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+        .unwrap()
+        .scroll_metrics()
+        .unwrap();
+    assert_eq!(
+        server
+            .clients
+            .get_mut(&12)
+            .unwrap()
+            .reconcile_pane_scroll_view(pane_id, metrics)
+            .offset_from_bottom,
+        3
+    );
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
 async fn client_shell_text_input_renders_only_when_resetting_scrollback() {
     let mut server = test_headless_server();
     let mut workspace = crate::workspace::Workspace::test_new("scrolled-input");

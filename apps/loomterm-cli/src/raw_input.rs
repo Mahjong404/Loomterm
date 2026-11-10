@@ -56,6 +56,14 @@ pub(crate) const GHOSTTY_COLOR_SCHEME_DARK_REPORT: &[u8] = b"\x1b[?997;1n";
 pub(crate) const GHOSTTY_COLOR_SCHEME_LIGHT_REPORT: &[u8] = b"\x1b[?997;2n";
 const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
 const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
+/// Exact completed-paste validation uses the 1 MiB payload cap. An unfinished
+/// paste needs a separate finite framing allowance before its terminator arrives.
+const MAX_PENDING_BRACKETED_PASTE_BYTES: usize = 2 * crate::protocol::MAX_INPUT_PAYLOAD;
+// The Windows console can serialize each pasted UTF-16 unit as paired CSI
+// key records. A 1 MiB source paste then occupies tens of MiB on the outer
+// PTY before it can be decoded. Only that recognized transport gets this cap.
+#[cfg(windows)]
+const MAX_PENDING_SERIALIZED_WIN32_PASTE_BYTES: usize = 64 * crate::protocol::MAX_INPUT_PAYLOAD;
 
 /// Returns the UTF-8 payload when `data` is exactly one complete bracketed paste.
 pub(crate) fn complete_text_bracketed_paste(data: &[u8]) -> Option<&str> {
@@ -80,6 +88,10 @@ pub enum RawInputEvent {
     Key(TerminalKey),
     Text(TextCommit),
     Paste(String),
+    /// The unfinished paste crossed the bounded framing allowance. The
+    /// remaining bytes are discarded until the closing marker arrives.
+    #[cfg(any(windows, test))]
+    PasteOverflow,
     Mouse(MouseEvent),
     OuterFocusGained,
     OuterFocusLost,
@@ -121,7 +133,11 @@ impl RawInputFramer {
     }
 
     pub(crate) fn push(&mut self, data: &[u8]) -> Vec<RawInputEvent> {
-        events_from_framed_chunks(self.byte_framer.push(data))
+        let mut events = events_from_framed_chunks(self.byte_framer.push(data));
+        if self.byte_framer.take_paste_overflow() {
+            events.push(RawInputEvent::PasteOverflow);
+        }
+        events
     }
 
     #[cfg(windows)]
@@ -143,6 +159,19 @@ impl RawInputFramer {
         self.byte_framer.has_pending_bracketed_paste()
     }
 
+    #[cfg(windows)]
+    pub(crate) fn allow_serialized_win32_paste(&mut self) {
+        if self.byte_framer.has_pending_bracketed_paste() {
+            self.byte_framer.serialized_win32_paste = true;
+        }
+    }
+
+    #[cfg(not(windows))]
+    pub(crate) fn allow_serialized_win32_paste(&mut self) {
+        // The shared Windows translation tests compile on Unix, but the Unix
+        // stdin reader never enables the serialized Win32 framing allowance.
+    }
+
     pub(crate) fn has_pending_default_mouse_sequence(&self) -> bool {
         starts_with_incomplete_default_mouse_sequence(&self.byte_framer.buffer)
     }
@@ -152,7 +181,9 @@ impl RawInputFramer {
     }
 
     pub(crate) fn flush_keyboard_escape(&mut self) -> Vec<RawInputEvent> {
-        if self.byte_framer.buffer.as_slice() == [ESC] {
+        if !self.byte_framer.has_pending_bracketed_paste()
+            && self.byte_framer.buffer.as_slice() == [ESC]
+        {
             self.byte_framer.lone_escape_recently_flushed = true;
             events_from_framed_chunks(vec![std::mem::take(&mut self.byte_framer.buffer)])
         } else {
@@ -175,7 +206,12 @@ impl RawInputFramer {
 fn events_from_framed_chunks(chunks: Vec<Vec<u8>>) -> Vec<RawInputEvent> {
     chunks
         .into_iter()
-        .filter_map(|chunk| {
+        .filter_map(|mut chunk| {
+            if let Some(payload_len) = complete_text_bracketed_paste(&chunk).map(str::len) {
+                chunk.drain(..BRACKETED_PASTE_START.len());
+                chunk.truncate(payload_len);
+                return String::from_utf8(chunk).ok().map(RawInputEvent::Paste);
+            }
             if chunk.as_slice() == [ESC] {
                 return Some(RawInputEvent::Key(
                     TerminalKey::new(crossterm::event::KeyCode::Esc, KeyModifiers::empty())
@@ -199,6 +235,14 @@ fn events_from_framed_chunks(chunks: Vec<Vec<u8>>) -> Vec<RawInputEvent> {
 #[derive(Default)]
 pub(crate) struct RawInputByteFramer {
     buffer: Vec<u8>,
+    bracketed_paste_scan_from: usize,
+    bracketed_paste_end: Option<usize>,
+    discarding_oversized_paste: bool,
+    paste_overflow_pending: bool,
+    #[cfg(windows)]
+    serialized_win32_paste: bool,
+    #[cfg(test)]
+    bracketed_paste_scan_steps: usize,
     discard_until: Option<ControlStringFamily>,
     discarded_tail_bytes: usize,
     // Keep the discarded prefix separate from continuation bytes awaiting validation.
@@ -261,6 +305,10 @@ impl RawInputByteFramer {
     pub(crate) fn push(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
         if data.is_empty() {
             return self.push_extended();
+        }
+        if !self.discarding_oversized_paste && !self.buffer.starts_with(BRACKETED_PASTE_START) {
+            self.bracketed_paste_scan_from = BRACKETED_PASTE_START.len();
+            self.bracketed_paste_end = None;
         }
         // Bytes after the idle limit are never part of the abandoned reply.
         self.drop_abandoned_host_color_reply();
@@ -411,7 +459,7 @@ impl RawInputByteFramer {
 
     #[cfg(any(unix, test))]
     pub(crate) fn has_pending_input(&self) -> bool {
-        !self.buffer.is_empty()
+        !self.buffer.is_empty() || self.discarding_oversized_paste
     }
 
     #[cfg(unix)]
@@ -469,12 +517,64 @@ impl RawInputByteFramer {
 
     #[cfg(any(windows, test))]
     pub(crate) fn has_pending_bracketed_paste(&self) -> bool {
-        self.buffer.starts_with(BRACKETED_PASTE_START)
-            && find_subsequence(&self.buffer, BRACKETED_PASTE_END).is_none()
+        self.discarding_oversized_paste
+            || (self.buffer.starts_with(BRACKETED_PASTE_START)
+                && self.bracketed_paste_end.is_none())
+    }
+
+    pub(crate) fn take_paste_overflow(&mut self) -> bool {
+        std::mem::take(&mut self.paste_overflow_pending)
+    }
+
+    fn discard_oversized_paste_bytes(&mut self) {
+        if let Some(end) = find_subsequence(&self.buffer, BRACKETED_PASTE_END) {
+            self.buffer.drain(..end + BRACKETED_PASTE_END.len());
+            self.discarding_oversized_paste = false;
+            #[cfg(windows)]
+            {
+                self.serialized_win32_paste = false;
+            }
+            self.bracketed_paste_scan_from = BRACKETED_PASTE_START.len();
+            self.bracketed_paste_end = None;
+            return;
+        }
+        let keep = (1..BRACKETED_PASTE_END.len())
+            .rev()
+            .find(|&len| self.buffer.ends_with(&BRACKETED_PASTE_END[..len]))
+            .unwrap_or(0);
+        // Retain only a split delimiter prefix and release the large allocation.
+        self.buffer = self.buffer.split_off(self.buffer.len() - keep);
+    }
+
+    fn find_bracketed_paste_end(&mut self) -> Option<usize> {
+        if let Some(end) = self.bracketed_paste_end {
+            return Some(end);
+        }
+        let last_start = self.buffer.len().checked_sub(BRACKETED_PASTE_END.len())?;
+        let first_start = self
+            .bracketed_paste_scan_from
+            .max(BRACKETED_PASTE_START.len());
+        for start in first_start..=last_start {
+            #[cfg(test)]
+            {
+                self.bracketed_paste_scan_steps += 1;
+            }
+            if self.buffer[start..].starts_with(BRACKETED_PASTE_END) {
+                self.bracketed_paste_end = Some(start);
+                return Some(start);
+            }
+        }
+        self.bracketed_paste_scan_from = last_start
+            .saturating_add(1)
+            .max(BRACKETED_PASTE_START.len());
+        None
     }
 
     pub(crate) fn flush_timeout(&mut self) -> Vec<Vec<u8>> {
         let mut chunks = self.drain_available_chunks();
+        if self.discarding_oversized_paste {
+            return chunks;
+        }
         self.expire_unanswered_host_queries();
 
         #[cfg(windows)]
@@ -564,7 +664,7 @@ impl RawInputByteFramer {
         }
 
         if self.buffer.starts_with(BRACKETED_PASTE_START)
-            && find_subsequence(&self.buffer, BRACKETED_PASTE_END).is_none()
+            && self.find_bracketed_paste_end().is_none()
         {
             tracing::trace!(
                 len = self.buffer.len(),
@@ -754,6 +854,13 @@ impl RawInputByteFramer {
         let mut chunks = Vec::new();
 
         loop {
+            if self.discarding_oversized_paste {
+                self.discard_oversized_paste_bytes();
+                if self.discarding_oversized_paste {
+                    break;
+                }
+                continue;
+            }
             if let Some(prefix) = &self.timed_out_mouse_prefix {
                 match classify_sgr_mouse_continuation(prefix, &self.buffer) {
                     SgrMouseContinuation::Incomplete => break,
@@ -860,7 +967,37 @@ impl RawInputByteFramer {
                 continue;
             }
 
-            let Some((event, consumed)) = extract_one_event(&self.buffer) else {
+            let extracted = if self.buffer.starts_with(BRACKETED_PASTE_START) {
+                let end = self.find_bracketed_paste_end();
+                #[cfg(windows)]
+                let max_pending_paste_bytes = if self.serialized_win32_paste {
+                    MAX_PENDING_SERIALIZED_WIN32_PASTE_BYTES
+                } else {
+                    MAX_PENDING_BRACKETED_PASTE_BYTES
+                };
+                #[cfg(not(windows))]
+                let max_pending_paste_bytes = MAX_PENDING_BRACKETED_PASTE_BYTES;
+                if end.is_none() && self.buffer.len() > max_pending_paste_bytes {
+                    self.discarding_oversized_paste = true;
+                    self.paste_overflow_pending = true;
+                    self.discard_oversized_paste_bytes();
+                    break;
+                }
+                end.and_then(|end| {
+                    // The event is only a tag here; the framed bytes are decoded
+                    // after extraction. Do not clone a potentially 64 MiB paste.
+                    std::str::from_utf8(&self.buffer[BRACKETED_PASTE_START.len()..end]).ok()?;
+                    Some((
+                        RawInputEvent::Paste(String::new()),
+                        end + BRACKETED_PASTE_END.len(),
+                    ))
+                })
+            } else {
+                self.bracketed_paste_scan_from = BRACKETED_PASTE_START.len();
+                self.bracketed_paste_end = None;
+                extract_one_event(&self.buffer)
+            };
+            let Some((event, consumed)) = extracted else {
                 break;
             };
             if matches!(
@@ -886,8 +1023,25 @@ impl RawInputByteFramer {
                 self.host_reply_activity_at = Some(Instant::now());
             }
             self.held_pending_host_reply_esc = false;
-            chunks.push(self.buffer[..consumed].to_vec());
-            self.buffer.drain(..consumed);
+            let completed_paste = matches!(event, RawInputEvent::Paste(_));
+            if completed_paste {
+                // Transfer the large allocation to the completed chunk and
+                // leave only any following input in the framer.
+                let mut completed = std::mem::take(&mut self.buffer);
+                self.buffer = completed.split_off(consumed);
+                chunks.push(completed);
+            } else {
+                chunks.push(self.buffer[..consumed].to_vec());
+                self.buffer.drain(..consumed);
+            }
+            if completed_paste {
+                self.bracketed_paste_scan_from = BRACKETED_PASTE_START.len();
+                self.bracketed_paste_end = None;
+                #[cfg(windows)]
+                {
+                    self.serialized_win32_paste = false;
+                }
+            }
         }
 
         chunks
@@ -2808,6 +2962,135 @@ mod tests {
             panic!("expected paste");
         };
         assert_eq!(text, "hello");
+    }
+
+    #[test]
+    fn m5_completed_paste_transfers_allocation_and_releases_framer_capacity() {
+        let mut framer = RawInputByteFramer::default();
+        assert!(framer.push(BRACKETED_PASTE_START).is_empty());
+        assert!(framer.push(&vec![b'x'; 256 * 1024]).is_empty());
+        framer
+            .buffer
+            .reserve(BRACKETED_PASTE_END.len() + b"after".len());
+        let buffered = framer.buffer.as_ptr();
+        assert!(framer.buffer.capacity() >= 256 * 1024);
+
+        let mut final_read = BRACKETED_PASTE_END.to_vec();
+        final_read.extend_from_slice(b"after");
+        let chunks = framer.push(&final_read);
+        assert_eq!(chunks[0].as_ptr(), buffered);
+        assert_eq!(chunks[0].len(), 256 * 1024 + 12);
+        assert_eq!(chunks.concat().len(), 256 * 1024 + 12 + 5);
+        assert!(framer.buffer.capacity() < 1024);
+    }
+
+    #[test]
+    fn m5_completed_paste_decoding_reuses_framed_bytes() {
+        let payload = "界😀\n".repeat(32 * 1024);
+        let mut chunk = BRACKETED_PASTE_START.to_vec();
+        chunk.extend_from_slice(payload.as_bytes());
+        chunk.extend_from_slice(BRACKETED_PASTE_END);
+        let owned = chunk.as_ptr();
+
+        let events = events_from_framed_chunks(vec![chunk]);
+        let [RawInputEvent::Paste(text)] = events.as_slice() else {
+            panic!("expected one paste");
+        };
+        assert_eq!(text, &payload);
+        assert_eq!(text.as_ptr(), owned);
+    }
+
+    #[test]
+    fn bracketed_paste_framing_scans_incrementally_across_small_reads() {
+        for payload_bytes in [301, 4_501, 16 * 1024] {
+            let mut payload = "界😀\n\r\x01\x1b[31m".to_owned();
+            payload.push_str(&"x".repeat(payload_bytes - payload.len()));
+            assert_eq!(payload.len(), payload_bytes);
+
+            let mut expected = BRACKETED_PASTE_START.to_vec();
+            expected.extend_from_slice(payload.as_bytes());
+            expected.extend_from_slice(BRACKETED_PASTE_END);
+
+            let mut framer = RawInputByteFramer::default();
+            let mut chunks = Vec::new();
+            for byte in &expected {
+                if framer.has_pending_bracketed_paste() {
+                    assert!(framer.flush_timeout().is_empty());
+                }
+                chunks.extend(framer.push(std::slice::from_ref(byte)));
+            }
+
+            assert_eq!(chunks, vec![expected]);
+            assert!(
+                framer.bracketed_paste_scan_steps <= payload_bytes + 1,
+                "scanned {} candidate positions for {payload_bytes} payload bytes",
+                framer.bracketed_paste_scan_steps
+            );
+            let events = events_from_framed_chunks(chunks);
+            assert!(matches!(events.as_slice(), [RawInputEvent::Paste(text)] if text == &payload));
+        }
+    }
+
+    #[test]
+    fn m5_incomplete_bracketed_paste_buffer_is_bounded() {
+        let mut framer = RawInputByteFramer::default();
+        assert!(framer.push(BRACKETED_PASTE_START).is_empty());
+        let mut rejections = 0;
+        for _ in 0..(3 * 1024 * 1024 / 4096) {
+            assert!(framer.push(&[b'x'; 4096]).is_empty());
+            assert!(framer.buffer.len() <= 2 * crate::protocol::MAX_INPUT_PAYLOAD + 4096);
+            assert!(framer.buffer.capacity() <= 2 * crate::protocol::MAX_INPUT_PAYLOAD + 4096);
+            rejections += usize::from(framer.take_paste_overflow());
+        }
+        assert_eq!(rejections, 1);
+        assert!(framer.has_pending_bracketed_paste());
+        assert!(framer.flush_timeout().is_empty());
+        assert!(framer.push(b"\x1b[20").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert!(framer.push(b"0~still discarded").is_empty());
+        assert!(framer.push(&BRACKETED_PASTE_END[..3]).is_empty());
+        assert!(framer.push(&BRACKETED_PASTE_END[3..]).is_empty());
+        assert!(!framer.has_pending_bracketed_paste());
+        assert!(!framer.take_paste_overflow());
+        let output = framer.push(b"after");
+        assert_eq!(output.concat(), b"after");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn recognized_win32_serialized_paste_uses_separate_raw_budget() {
+        let mut framer = RawInputFramer::default();
+        assert!(framer.push(BRACKETED_PASTE_START).is_empty());
+        framer.allow_serialized_win32_paste();
+        for _ in 0..(3 * 1024 * 1024 / 4096) {
+            assert!(framer.push(&[b'x'; 4096]).is_empty());
+        }
+        assert!(framer.push(BRACKETED_PASTE_END).iter().any(
+            |event| matches!(event, RawInputEvent::Paste(text) if text.len() == 3 * 1024 * 1024)
+        ));
+        assert!(!framer.byte_framer.serialized_win32_paste);
+    }
+
+    #[test]
+    fn m5_incomplete_paste_overflow_is_one_visible_raw_event() {
+        let mut framer = RawInputFramer::default();
+        assert!(framer.push(BRACKETED_PASTE_START).is_empty());
+        let mut rejected = Vec::new();
+        for _ in 0..(3 * 1024 * 1024 / 4096) {
+            rejected.extend(framer.push(&[b'x'; 4096]));
+        }
+        assert!(matches!(
+            rejected.as_slice(),
+            [RawInputEvent::PasteOverflow]
+        ));
+        assert!(framer.push(&BRACKETED_PASTE_END[..1]).is_empty());
+        assert!(framer.flush_keyboard_escape().is_empty());
+        assert!(framer.push(&BRACKETED_PASTE_END[1..]).is_empty());
+        let recovery = framer.push(b"ok");
+        assert!(!recovery.is_empty());
+        assert!(!recovery
+            .iter()
+            .any(|event| matches!(event, RawInputEvent::PasteOverflow)));
     }
 
     #[test]

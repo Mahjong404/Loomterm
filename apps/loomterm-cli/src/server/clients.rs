@@ -129,6 +129,39 @@ impl ClientShellLocation {
     }
 }
 
+/// A client-local terminal reading position. Absence means follow the tail.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ClientPaneScrollView {
+    offset_from_bottom: usize,
+    max_offset_from_bottom: usize,
+    viewport_rows: usize,
+}
+
+impl ClientPaneScrollView {
+    pub(crate) fn reconcile(
+        &mut self,
+        metrics: crate::pane::ScrollMetrics,
+    ) -> crate::pane::ScrollMetrics {
+        let next_max = metrics.max_offset_from_bottom;
+        self.offset_from_bottom = if next_max >= self.max_offset_from_bottom {
+            self.offset_from_bottom
+                .saturating_add(next_max - self.max_offset_from_bottom)
+        } else if metrics.viewport_rows != self.viewport_rows {
+            self.offset_from_bottom
+                .saturating_sub(self.max_offset_from_bottom - next_max)
+        } else {
+            self.offset_from_bottom
+        }
+        .min(next_max);
+        self.max_offset_from_bottom = next_max;
+        self.viewport_rows = metrics.viewport_rows;
+        crate::pane::ScrollMetrics {
+            offset_from_bottom: self.offset_from_bottom,
+            ..metrics
+        }
+    }
+}
+
 /// A connected client tracked by the server.
 pub(crate) struct ClientConnection {
     /// Whether this connection owns the Herdr shell or one direct terminal stream.
@@ -177,6 +210,8 @@ pub(crate) struct ClientConnection {
     pub(crate) shell_location: Option<ClientShellLocation>,
     /// Last coherent shell replacement sent to this client.
     pub(crate) shell_snapshot: Option<crate::protocol::ClientShellSnapshot>,
+    /// Non-tail reading positions owned by this client attachment.
+    pub(crate) pane_scroll_views: HashMap<crate::layout::PaneId, ClientPaneScrollView>,
     pub(crate) shell_agent_completions: Option<crate::protocol::endpoint::EndpointAgentCompletions>,
     /// View policy paired with the last coherent shell replacement.
     pub(crate) shell_agent_view: Option<crate::api::schema::AgentViewSetParams>,
@@ -247,6 +282,7 @@ impl ClientConnection {
             staged_clipboard_files: Vec::new(),
             shell_location: None,
             shell_snapshot: None,
+            pane_scroll_views: HashMap::new(),
             shell_agent_completions: None,
             shell_agent_view: None,
             shell_projection_revision: 0,
@@ -265,6 +301,72 @@ impl ClientConnection {
 
     pub(crate) fn request_recompute(&mut self) {
         self.render_state.request_recompute();
+    }
+
+    pub(crate) fn set_pane_scroll_view(
+        &mut self,
+        pane_id: crate::layout::PaneId,
+        offset_from_bottom: usize,
+        metrics: crate::pane::ScrollMetrics,
+    ) -> crate::pane::ScrollMetrics {
+        let offset_from_bottom = offset_from_bottom.min(metrics.max_offset_from_bottom);
+        if offset_from_bottom == 0 {
+            self.pane_scroll_views.remove(&pane_id);
+        } else {
+            self.pane_scroll_views.insert(
+                pane_id,
+                ClientPaneScrollView {
+                    offset_from_bottom,
+                    max_offset_from_bottom: metrics.max_offset_from_bottom,
+                    viewport_rows: metrics.viewport_rows,
+                },
+            );
+        }
+        crate::pane::ScrollMetrics {
+            offset_from_bottom,
+            ..metrics
+        }
+    }
+
+    pub(crate) fn scroll_pane_view_by(
+        &mut self,
+        pane_id: crate::layout::PaneId,
+        delta_from_bottom: isize,
+        metrics: crate::pane::ScrollMetrics,
+    ) -> crate::pane::ScrollMetrics {
+        let current = self.reconcile_pane_scroll_view(pane_id, metrics);
+        let next = if delta_from_bottom >= 0 {
+            current
+                .offset_from_bottom
+                .saturating_add(delta_from_bottom as usize)
+        } else {
+            current
+                .offset_from_bottom
+                .saturating_sub(delta_from_bottom.unsigned_abs())
+        };
+        self.set_pane_scroll_view(pane_id, next, metrics)
+    }
+
+    pub(crate) fn reconcile_pane_scroll_view(
+        &mut self,
+        pane_id: crate::layout::PaneId,
+        metrics: crate::pane::ScrollMetrics,
+    ) -> crate::pane::ScrollMetrics {
+        let Some(view) = self.pane_scroll_views.get_mut(&pane_id) else {
+            return crate::pane::ScrollMetrics {
+                offset_from_bottom: 0,
+                ..metrics
+            };
+        };
+        let reconciled = view.reconcile(metrics);
+        if reconciled.offset_from_bottom == 0 {
+            self.pane_scroll_views.remove(&pane_id);
+        }
+        reconciled
+    }
+
+    pub(crate) fn clear_pane_scroll_view(&mut self, pane_id: crate::layout::PaneId) {
+        self.pane_scroll_views.remove(&pane_id);
     }
 
     pub(crate) fn track_shell_input(
@@ -607,5 +709,95 @@ mod tests {
                 ..
             } if *record == windows_record
         ));
+    }
+
+    #[test]
+    fn client_scroll_view_keeps_anchor_and_clamps_evicted_history() {
+        let pane_id = crate::layout::PaneId::from_raw(7);
+        let metrics = crate::pane::ScrollMetrics {
+            offset_from_bottom: 0,
+            max_offset_from_bottom: 20,
+            viewport_rows: 24,
+        };
+        let mut client = shell_client();
+        assert_eq!(
+            client
+                .set_pane_scroll_view(pane_id, 5, metrics)
+                .offset_from_bottom,
+            5
+        );
+
+        let after_output = crate::pane::ScrollMetrics {
+            max_offset_from_bottom: 27,
+            ..metrics
+        };
+        assert_eq!(
+            client
+                .reconcile_pane_scroll_view(pane_id, after_output)
+                .offset_from_bottom,
+            12,
+            "new output should preserve the visible history anchor"
+        );
+
+        let after_reflow = crate::pane::ScrollMetrics {
+            max_offset_from_bottom: 24,
+            viewport_rows: 27,
+            ..after_output
+        };
+        assert_eq!(
+            client
+                .reconcile_pane_scroll_view(pane_id, after_reflow)
+                .offset_from_bottom,
+            9,
+            "reflow should preserve the closest offset from the same anchor"
+        );
+
+        let after_viewport_resize = crate::pane::ScrollMetrics {
+            max_offset_from_bottom: 27,
+            viewport_rows: 24,
+            ..after_reflow
+        };
+        assert_eq!(
+            client
+                .reconcile_pane_scroll_view(pane_id, after_viewport_resize)
+                .offset_from_bottom,
+            12,
+            "a taller viewport should preserve the anchor against the bottom"
+        );
+
+        let after_eviction = crate::pane::ScrollMetrics {
+            max_offset_from_bottom: 4,
+            ..after_viewport_resize
+        };
+        assert_eq!(
+            client
+                .reconcile_pane_scroll_view(pane_id, after_eviction)
+                .offset_from_bottom,
+            4,
+            "evicted history should clamp at the oldest retained row"
+        );
+        assert!(client.pane_scroll_views.contains_key(&pane_id));
+        client.set_pane_scroll_view(pane_id, 0, after_eviction);
+        assert!(!client.pane_scroll_views.contains_key(&pane_id));
+    }
+
+    #[test]
+    fn pane_scroll_views_are_attachment_local_and_released_on_detach() {
+        let pane_id = crate::layout::PaneId::from_raw(7);
+        let metrics = crate::pane::ScrollMetrics {
+            offset_from_bottom: 0,
+            max_offset_from_bottom: 20,
+            viewport_rows: 24,
+        };
+        let mut first = shell_client();
+        let second = shell_client();
+        first.set_pane_scroll_view(pane_id, 8, metrics);
+
+        assert_eq!(first.pane_scroll_views[&pane_id].offset_from_bottom, 8);
+        assert!(second.pane_scroll_views.is_empty());
+        assert!(shell_client().pane_scroll_views.is_empty());
+
+        first.set_pane_scroll_view(pane_id, 0, metrics);
+        assert!(first.pane_scroll_views.is_empty());
     }
 }

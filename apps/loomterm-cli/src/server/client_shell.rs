@@ -292,7 +292,19 @@ pub(super) fn render_pane_surface(
     cell_size: crate::kitty_graphics::HostCellSize,
     graphics_delivery: &crate::kitty_graphics::surface::DeliveryCache,
     client_id: u64,
+    pane_scroll_views: &mut std::collections::HashMap<
+        crate::layout::PaneId,
+        crate::server::clients::ClientPaneScrollView,
+    >,
 ) -> Result<RenderedPaneSurface, SurfaceRenderDeferred> {
+    let live_panes = app
+        .state
+        .workspaces
+        .iter()
+        .flat_map(|workspace| workspace.tabs.iter())
+        .flat_map(|tab| tab.layout.pane_ids())
+        .collect::<std::collections::HashSet<_>>();
+    pane_scroll_views.retain(|pane_id, _| live_panes.contains(pane_id));
     let layout = crate::ui::compute_tab_surface_for(
         &app.state,
         &app.terminal_runtimes,
@@ -301,6 +313,33 @@ pub(super) fn render_pane_surface(
         resize_panes,
         cell_size,
     );
+    let mut scroll_metrics = std::collections::HashMap::new();
+    if let Some(target) = target {
+        for pane in &layout.pane_infos {
+            if let Some(metrics) = app
+                .state
+                .runtime_for_pane_in_workspace(
+                    &app.terminal_runtimes,
+                    target.workspace_index,
+                    pane.id,
+                )
+                .and_then(|runtime| runtime.scroll_metrics())
+            {
+                let metrics = metrics.for_client_rows(pane.inner_rect.height as usize);
+                let view_metrics = pane_scroll_views.get_mut(&pane.id).map_or(
+                    crate::pane::ScrollMetrics {
+                        offset_from_bottom: 0,
+                        ..metrics
+                    },
+                    |view| view.reconcile(metrics),
+                );
+                if view_metrics.offset_from_bottom == 0 {
+                    pane_scroll_views.remove(&pane.id);
+                }
+                scroll_metrics.insert(pane.id, view_metrics);
+            }
+        }
+    }
     let mut content_revisions_before = std::collections::HashMap::new();
     if let Some(target) = target {
         for pane in &layout.pane_infos {
@@ -335,11 +374,12 @@ pub(super) fn render_pane_surface(
         None
     };
     let (buffer, cursor, hyperlinks, layout) =
-        crate::server::render_stream::render_tab_surface_virtual(
+        crate::server::render_stream::render_tab_surface_virtual_with_scroll_metrics(
             &app.state,
             &app.terminal_runtimes,
             layout,
             area,
+            Some(&scroll_metrics),
         );
     let panes = target
         .map(|target| {
@@ -384,13 +424,13 @@ pub(super) fn render_pane_surface(
                             rect: pane.rect.into(),
                             inner_rect: pane.inner_rect.into(),
                             scrollbar_rect: pane.scrollbar_rect.map(Into::into),
-                            scroll: runtime.and_then(|runtime| runtime.scroll_metrics()).map(
-                                |metrics| protocol::PaneSurfaceScrollMetrics {
+                            scroll: scroll_metrics.get(&pane.id).copied().map(|metrics| {
+                                protocol::PaneSurfaceScrollMetrics {
                                     offset_from_bottom: metrics.offset_from_bottom as u64,
                                     max_offset_from_bottom: metrics.max_offset_from_bottom as u64,
                                     viewport_rows: metrics.viewport_rows as u64,
-                                },
-                            ),
+                                }
+                            }),
                             focused: pane.is_focused,
                             mouse_reporting,
                             sgr_pixel_mouse,
@@ -446,6 +486,7 @@ pub(super) fn render_pane_surface(
             &layout.split_borders,
             popup.as_deref(),
             target,
+            Some(&scroll_metrics),
             cell_size,
             graphics_delivery,
             client_id,

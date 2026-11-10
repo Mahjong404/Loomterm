@@ -335,19 +335,32 @@ fn collect_visible_placements(
             }
         };
         let mut requested_images = HashSet::new();
-        let pane_placements = runtime.kitty_image_placements_with_data_filter(|descriptor| {
-            if descriptor.source_file {
-                return false;
-            }
-            terminal_image_needs_data(info.id, descriptor, delivered_images, &mut requested_images)
-        });
+        let scrollback_offset = surface
+            .scroll_metrics
+            .and_then(|metrics| metrics.get(&info.id))
+            .map_or_else(
+                || runtime.scroll_metrics().map_or(0, |m| m.offset_from_bottom),
+                |metrics| metrics.offset_from_bottom,
+            );
+        let pane_placements = runtime.kitty_image_placements_at_scroll_offset_with_data_filter(
+            scrollback_offset,
+            info.inner_rect.height,
+            |descriptor| {
+                if descriptor.source_file {
+                    return false;
+                }
+                terminal_image_needs_data(
+                    info.id,
+                    descriptor,
+                    delivered_images,
+                    &mut requested_images,
+                )
+            },
+        );
         if pane_placements.is_empty() {
             continue;
         }
-        let scrollback_offset = runtime
-            .scroll_metrics()
-            .map(|m| m.offset_from_bottom as u32)
-            .unwrap_or(0);
+        let scrollback_offset = u32::try_from(scrollback_offset).unwrap_or(u32::MAX);
         for placement in pane_placements {
             placements.push(HostPlacement {
                 raw_data: None,

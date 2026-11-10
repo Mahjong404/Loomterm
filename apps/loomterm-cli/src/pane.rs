@@ -3606,6 +3606,29 @@ impl PaneRuntime {
         })
     }
 
+    pub(crate) fn cursor_state_at_scroll_offset(
+        &self,
+        area: Rect,
+        show_cursor: bool,
+        offset_from_bottom: usize,
+    ) -> Option<TerminalCursorState> {
+        if !show_cursor {
+            return None;
+        }
+        let cursor = self
+            .terminal
+            .cursor_state_at_scroll_offset(offset_from_bottom, area.height)?;
+        if cursor.x >= area.width || cursor.y >= area.height {
+            return None;
+        }
+        Some(TerminalCursorState {
+            x: area.x + cursor.x,
+            y: area.y + cursor.y,
+            visible: cursor.visible,
+            shape: cursor.shape,
+        })
+    }
+
     pub fn synchronized_output_active(&self) -> bool {
         self.terminal.synchronized_output_active()
     }
@@ -3683,6 +3706,17 @@ impl PaneRuntime {
         self.terminal.render(frame, area, show_cursor);
     }
 
+    pub(crate) fn render_at_scroll_offset(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        show_cursor: bool,
+        offset_from_bottom: usize,
+    ) {
+        self.terminal
+            .render_at_scroll_offset(frame, area, show_cursor, offset_from_bottom);
+    }
+
     pub(crate) fn collect_dirty_patch_snapshot(
         &self,
         area_width: u16,
@@ -3719,6 +3753,15 @@ impl PaneRuntime {
         self.terminal.visible_hyperlinks(area)
     }
 
+    pub(crate) fn visible_hyperlinks_at_scroll_offset(
+        &self,
+        area: Rect,
+        offset_from_bottom: usize,
+    ) -> Vec<((u16, u16), String, String)> {
+        self.terminal
+            .visible_hyperlinks_at_scroll_offset(area, offset_from_bottom)
+    }
+
     pub(crate) fn link_regions_at(
         &self,
         col: u16,
@@ -3745,6 +3788,23 @@ impl PaneRuntime {
     {
         self.terminal
             .kitty_image_placements_with_data_filter(needs_data)
+    }
+
+    pub(crate) fn kitty_image_placements_at_scroll_offset_with_data_filter<F>(
+        &self,
+        offset_from_bottom: usize,
+        visible_rows: u16,
+        needs_data: F,
+    ) -> Vec<crate::ghostty::KittyImagePlacement>
+    where
+        F: FnMut(crate::ghostty::KittyImageDescriptor) -> bool,
+    {
+        self.terminal
+            .kitty_image_placements_at_scroll_offset_with_data_filter(
+                offset_from_bottom,
+                visible_rows,
+                needs_data,
+            )
     }
 
     pub(crate) fn kitty_image_fingerprints(&self, image_ids: &[u32]) -> Vec<Option<u64>> {

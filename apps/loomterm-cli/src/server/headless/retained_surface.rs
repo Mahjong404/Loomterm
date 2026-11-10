@@ -283,6 +283,10 @@ impl HeadlessServer {
             if client.render_state.requires_recompute() {
                 fallback!("recompute_pending");
             }
+            if !client.pane_scroll_views.is_empty() {
+                // Dirty rows use the engine viewport; readers need a full projection.
+                fallback!("client_scrolled_back");
+            }
             let Some(surface) = client.render_state.last_pane_surface() else {
                 fallback!("no_baseline");
             };
@@ -298,6 +302,24 @@ impl HeadlessServer {
             }
             if has_synchronized_pane(&self.app, surface) {
                 fallback!("synchronized_visible");
+            }
+            if surface.panes.iter().any(|pane| {
+                self.app
+                    .parse_pane_id(&pane.pane_id)
+                    .and_then(|(workspace_index, pane_id)| {
+                        self.app.state.runtime_for_pane_in_workspace(
+                            &self.app.terminal_runtimes,
+                            workspace_index,
+                            pane_id,
+                        )
+                    })
+                    .is_some_and(|runtime| {
+                        runtime.current_size() != (pane.inner_rect.height, pane.inner_rect.width)
+                    })
+            }) {
+                // Dirty rows/cursor use engine coordinates, not the shorter
+                // attachment's bottom-aligned projection.
+                fallback!("client_viewport_crop");
             }
             recipients.push(RetainedRecipient {
                 client_id: *client_id,

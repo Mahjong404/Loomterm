@@ -156,7 +156,7 @@ mod windows {
             {
                 return Err(mpsc::error::TrySendError::Closed(bytes));
             }
-            if bytes.len() > 1024 * 1024 {
+            if bytes.len() > budget::MAX_USER_WRITE_BYTES {
                 return Err(mpsc::error::TrySendError::Full(bytes));
             }
             let Some(permit) = self.input_budget.acquire(bytes.len()) else {
@@ -749,6 +749,28 @@ mod windows {
             );
             drop(write_rx);
             assert!(budget.acquire(2 * 1024 * 1024).is_some());
+        }
+
+        #[test]
+        fn m5_windows_pty_accepts_the_full_admitted_paste_with_crlf_and_markers() {
+            let (handle, mut data_rx, _writes) = m1_paused_actor();
+            let max = budget::MAX_USER_WRITE_BYTES;
+            assert_eq!(
+                max,
+                2 * crate::protocol::MAX_INPUT_PAYLOAD + budget::PASTE_MARKER_BYTES
+            );
+            let admitted = Bytes::from(vec![b'x'; max]);
+            handle.try_write_user_input(admitted.clone()).unwrap();
+            let PtyIoDataCommand::WriteUserInput(actual, _permit) = data_rx.try_recv().unwrap()
+            else {
+                panic!("expected admitted PTY input");
+            };
+            assert_eq!(actual, admitted);
+            let oversized = Bytes::from(vec![b'x'; max + 1]);
+            assert!(matches!(
+                handle.try_write_user_input(oversized),
+                Err(mpsc::error::TrySendError::Full(_))
+            ));
         }
 
         #[test]

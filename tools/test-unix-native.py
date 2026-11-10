@@ -276,7 +276,8 @@ def main():
             return Path(next(m['executable'] for m in reversed(messages)
                              if m.get('reason') == 'compiler-artifact' and m['target']['name'] == name and m.get('executable')))
         exe, host = artifact('loomterm'), artifact('loomterm_native')
-        for prefix in ('m2_', 'm1_', 'backpressure'):
+        for prefix in ('m2_', 'm1_', 'backpressure', 'm5_', 'surface_scroll',
+                       'selection', 'bracketed_paste'):
             run('tests-' + prefix.rstrip('_'), ['cargo', 'test', '--bin', 'loomterm', prefix,
                                                '--target', triple, '--locked', '--', '--test-threads=1'], 300)
         run('engine-tests', ['cargo', 'test', '-p', 'ghostty-vt', '--lib', '--target', triple, '--locked'], 300)
